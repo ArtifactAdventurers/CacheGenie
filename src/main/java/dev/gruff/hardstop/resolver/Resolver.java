@@ -9,9 +9,11 @@ import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.graph.DependencyFilter;
 import org.eclipse.aether.impl.DefaultServiceLocator;
 import org.eclipse.aether.repository.LocalRepository;
+import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.resolution.ArtifactResult;
 import org.eclipse.aether.resolution.DependencyRequest;
 import org.eclipse.aether.resolution.DependencyResolutionException;
+import org.eclipse.aether.resolution.DependencyResult;
 import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
 import org.eclipse.aether.spi.connector.transport.TransporterFactory;
 import org.eclipse.aether.transport.file.FileTransporterFactory;
@@ -52,6 +54,7 @@ public class Resolver {
         session=MavenRepositorySystemUtils.newSession();
         session.setRepositoryListener(new RepositoryListener(this) {
         });
+
     }
 
     public List<ArtifactResult> resolve(String d) throws DependencyResolutionException {
@@ -94,17 +97,23 @@ public class Resolver {
 
         Dependency dependency = new Dependency(new DefaultArtifact(d), JavaScopes.COMPILE);
 
-        CollectRequest collectRequest = new CollectRequest();
-        collectRequest.setRoot(dependency);
+        RemoteRepository rr=new RemoteRepository.Builder("central", "default", "https://repo1.maven.org/maven2/").build();
+        List<RemoteRepository> rrlist=new LinkedList<>();
+        rrlist.add(rr);
 
-        DependencyFilter classpathFilter = DependencyFilterUtils
-                .classpathFilter(JavaScopes.COMPILE, JavaScopes.RUNTIME);
+        CollectRequest cr=new CollectRequest(dependency,rrlist);
+        //CollectRequest collectRequest = new CollectRequest();
+        //collectRequest.setRoot(dependency);
 
-        DependencyRequest dependencyRequest = new DependencyRequest(collectRequest, classpathFilter);
+       DependencyFilter classpathFilter = null ; //DependencyFilterUtils
+         //       .classpathFilter(JavaScopes.COMPILE, JavaScopes.RUNTIME);
+
+        DependencyRequest dependencyRequest = new DependencyRequest(cr, classpathFilter);
 
         List<ArtifactResult> results= new LinkedList<>();
         try {
-            results = system.resolveDependencies(session, dependencyRequest).getArtifactResults();
+            DependencyResult dr = system.resolveDependencies(session, dependencyRequest);
+            results=dr.getArtifactResults();
         } catch (DependencyResolutionException e) {
             log.info(e.getMessage());
         }

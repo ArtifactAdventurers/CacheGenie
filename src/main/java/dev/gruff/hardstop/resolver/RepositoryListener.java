@@ -16,7 +16,7 @@ class RepositoryListener extends AbstractRepositoryListener {
 
     @Override
     public void artifactDescriptorMissing(RepositoryEvent repositoryEvent) {
-        log.debug(repositoryEvent.getArtifact()+" missing");
+        log.info(repositoryEvent.getArtifact()+" missing");
 
     }
 
@@ -27,7 +27,7 @@ class RepositoryListener extends AbstractRepositoryListener {
 
     @Override
     public void artifactResolved(RepositoryEvent repositoryEvent) {
-        log.debug(repositoryEvent.getArtifact()+" resolved");
+        log.info(repositoryEvent.getArtifact()+" resolved");
     }
 
 }
