@@ -1,6 +1,7 @@
-package dev.gruff.hardstop.cachegenie;
+package dev.gruff.hardstop.resolver;
 
 import org.jsoup.Connection;
+import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -8,8 +9,12 @@ import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class VersionResolver {
     private static final Logger log = LoggerFactory.getLogger(VersionResolver.class);

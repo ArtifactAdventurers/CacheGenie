@@ -1,4 +1,4 @@
-package dev.gruff.hardstop.cachegenie;
+package dev.gruff.hardstop.resolver;
 
 import org.eclipse.aether.AbstractRepositoryListener;
 import org.eclipse.aether.RepositoryEvent;
