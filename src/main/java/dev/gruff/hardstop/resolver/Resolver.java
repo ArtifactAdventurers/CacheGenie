@@ -1,4 +1,4 @@
-package dev.gruff.hardstop.cachegenie;
+package dev.gruff.hardstop.resolver;
 
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.*;
@@ -19,6 +19,7 @@ import org.eclipse.aether.spi.connector.transport.TransporterFactory;
 import org.eclipse.aether.transport.file.FileTransporterFactory;
 import org.eclipse.aether.transport.http.HttpTransporterFactory;
 import org.eclipse.aether.util.artifact.JavaScopes;
+import org.eclipse.aether.util.filter.DependencyFilterUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
