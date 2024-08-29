@@ -2,7 +2,7 @@ package dev.gruff.hardstop.treestreamer.streamers;
 
 import java.util.stream.Stream;
 
-public sealed interface TreeStreamer< P > permits FileSystemTreeStreamer, URITreeStreamer {
+public sealed interface TreeStreamer permits FileSystemTreeStreamer, URITreeStreamer {
 
-    public Stream<P> stream();
+    public Stream<Object> stream();
 }

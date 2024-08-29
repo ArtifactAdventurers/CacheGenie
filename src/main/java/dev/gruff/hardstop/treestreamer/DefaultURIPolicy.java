@@ -4,7 +4,7 @@ import org.jsoup.Connection;
 
 public final class DefaultURIPolicy  {
 
-    public LinkParser handler(Connection.Response r) {
+    public LinkReader handler(Connection.Response r) {
         return null;
     }
 }

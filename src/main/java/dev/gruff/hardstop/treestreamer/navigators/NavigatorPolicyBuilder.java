@@ -1,89 +1,102 @@
 package dev.gruff.hardstop.treestreamer.navigators;
 
 
-import dev.gruff.hardstop.treestreamer.LinkParser;
 import dev.gruff.hardstop.treestreamer.ContentType;
-import dev.gruff.hardstop.treestreamer.Node;
+import dev.gruff.hardstop.treestreamer.LinkReader;
 
 import java.time.Duration;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 public class NavigatorPolicyBuilder {
-    public static Config builder() {
 
-        return new Config();
+
+    public static final class MyUriPolicy extends AbstractNavigatorPolicy {
     }
 
-    public static class Config {
+    AbstractNavigatorPolicy policy;
 
-        MyURIPolicy p=new MyURIPolicy();
+    public static NavigatorPolicyBuilder builder() {
 
-        public Config defaultNavigator(ContentType html, LinkParser parser) {
-            p.defaultHandler(parser);
-            return this;
-        }
+        return new NavigatorPolicyBuilder();
+    }
 
-        public Config maxDepth(int i) {
-            p.maxDepth=i;
-            return this;
-        }
+    private NavigatorPolicyBuilder() {
+        policy= new MyUriPolicy();
+    }
 
 
+    public NavigatorPolicy build() {
+        NavigatorPolicy r=policy;
+        policy= new MyUriPolicy();
+        return r;
+    }
+    public NavigatorPolicyBuilder defaultReader(LinkReader parser) {
+        policy.defaultHandler(parser);
+        return this;
+    }
 
-        public Config rateLimit(int count, Duration d) {
-            p.rateLimit(count,d);
-            return this;
-        }
+    public NavigatorPolicyBuilder maxDepth(int i) {
+        policy.maxDepth=i;
+        return this;
+    }
 
+    public NavigatorPolicyBuilder rateLimit(int count, Duration d) {
+        policy.rateLimit(count,d);
+        return this;
+    }
 
-        public class ConfigHandler {
+    public MatchConfig<LinkSetImpl> onMatch(Predicate<Link> l) {
+        return new MatchConfig<LinkSetImpl>(l);
+    }
 
-            private Predicate<Node> pred=null;
-
-
-            public ConfigHandler(Predicate<Node> identifier) {
-                pred=identifier;
-            }
-
-            public ConfigHandler and(Predicate<Node> identifier) {
-                if(identifier==null) throw new RuntimeException("predicate is null");
-                pred=pred.and(identifier);
-                return this;
-            }
-
-            public Config useNavigator(LinkParser handler) {
-                if(handler==null) throw new RuntimeException("handler is null");
-                Config.this.p.addHandler(pred,handler);
-                return Config.this;
-            }
-
-
-        }
+    public MatchConfig<LinkSetImpl> onMatch(ContentType t) {
+        return new MatchConfig<LinkSetImpl>(u -> u.isType(t));
+    }
 
 
-        public ConfigHandler when(Predicate<Node> identifier) {
-
-            return new ConfigHandler(identifier);
-        }
-
-        public NavigatorPolicy build() {
-           MyURIPolicy r=p;
-           p=new MyURIPolicy();
-           return r;
-        }
-
-        private Config copy() {
-            return this;
-        }
-
-        public Config then() {
-            return this;
-        }
-
-        final class MyURIPolicy extends AbstractNavigatorPolicy implements NavigatorPolicy {
-            Config c= Config.this.copy();
+  public class MatchConfig<M> {
 
 
-        }
+      private Predicate<Link> predicate=null;
+
+     private MatchConfig(Predicate<Link> l) {
+
+         this.predicate=l;
+     }
+
+      public class ParserConfig<R> {
+
+         private AbstractNavigatorPolicy.Selector s;
+          public ParserConfig(AbstractNavigatorPolicy.Selector selector) {
+              s=selector;
+          }
+
+
+          public NavigatorPolicy build() {
+              return NavigatorPolicyBuilder.this.build();
+          }
+
+
+      }
+
+
+      public MatchConfig<M> and(Predicate<Link> l) {
+         predicate=predicate.and(l);
+         return this;
+      }
+
+      public MatchConfig<M> or(Predicate<Link> l) {
+          predicate=predicate.or(l);
+          return this;
+      }
+
+      public <T> ParserConfig<T> useReader(LinkReader linkParser) {
+        AbstractNavigatorPolicy.Selector selector= NavigatorPolicyBuilder.this.policy.addSelector(predicate,linkParser);
+         return new ParserConfig<>(selector);
+      }
+
+
+
     }
 }

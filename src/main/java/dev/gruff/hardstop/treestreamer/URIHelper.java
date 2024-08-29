@@ -1,5 +1,7 @@
 package dev.gruff.hardstop.treestreamer;
 
+import dev.gruff.hardstop.treestreamer.navigators.Link;
+
 import java.net.URI;
 
 public class URIHelper {
@@ -40,5 +42,12 @@ public class URIHelper {
        } catch(Exception e) {
            return null;
        }
+    }
+
+    public static String file(URI u) {
+        String name=u.getPath();
+        if(name==null ||name.trim().equals("")) return null;
+        String[] bits=name.split("/");
+        return bits[bits.length-1];
     }
 }

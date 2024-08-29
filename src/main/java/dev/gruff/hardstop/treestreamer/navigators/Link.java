@@ -1,10 +1,14 @@
 package dev.gruff.hardstop.treestreamer.navigators;
 
+import dev.gruff.hardstop.treestreamer.ContentType;
+
 import java.net.URI;
 
-public interface Link<P,T>{
+public interface Link{
 
-    P path();
-    T data();
-    int compareTo(Link<P,T> o);
+
+    URI path();
+
+
+    boolean isType(ContentType contentType);
 }

@@ -4,7 +4,7 @@ import java.io.File;
 import java.util.Arrays;
 import java.util.stream.Stream;
 
-public abstract sealed class FileSystemTreeStreamer implements TreeStreamer<File> permits  FileSystemTreeStreamer.InternalFileSystemTreeStreamer {
+public abstract sealed class FileSystemTreeStreamer implements TreeStreamer permits  FileSystemTreeStreamer.InternalFileSystemTreeStreamer {
    private File root;
    private boolean suppressDirs=false;
     public FileSystemTreeStreamer(File froot) {
@@ -12,11 +12,11 @@ public abstract sealed class FileSystemTreeStreamer implements TreeStreamer<File
     }
 
     @Override
-    public Stream<File> stream() {
+    public Stream<Object> stream() {
         return expand(root);
     }
 
-    private Stream<File> expand(File r) {
+    private Stream<Object> expand(File r) {
 
         if(r==null) return Stream.empty();
         File[] kids=r.listFiles();
