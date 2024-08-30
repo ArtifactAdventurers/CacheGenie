@@ -56,10 +56,12 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
 
         Link m=contents.get("maven-metadata.xml");
         if(m!=null) {
-           return toMeta(m,contents);
-        } else {
-            return lsi;
+           Meta meta= toMeta(m,contents);
+           if(meta!=null) return meta;
         }
+
+        return lsi;
+
 
 
     }
@@ -67,6 +69,7 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
 
     private Meta toMeta(Link m, Map<String, LinkImpl> contents) {
        Meta meta= mb.build(m.path());
+       if(meta==null) return null;
        for(String key:contents.keySet()) {
             LinkImpl li=contents.get(key);
             if(li.directory) {
