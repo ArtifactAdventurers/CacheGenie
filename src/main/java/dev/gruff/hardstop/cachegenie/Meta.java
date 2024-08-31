@@ -89,6 +89,11 @@ public class Meta {
         Properties p=new Properties();
         try( FileReader fr=new FileReader(f)) {
             p.load(fr);
+            if(p.keySet().size()==0) {
+                System.out.println("nodata "+f.getAbsolutePath());
+                meta.status= Status.corrupted_propoerties;
+                return meta;
+            }
             meta.status= Status.has_properties;
             meta.uri=toURI(p);
             meta.gid=p.getProperty("meta.gid");
@@ -105,11 +110,13 @@ public class Meta {
                 Version vers=new Version();
                 vers.version=v;
                 vers.updated=toInstant(updated);
+                if(meta.updated==null) meta.updated=vers.updated;
                 meta.versions.put(v,vers);
             }
 
             //
         } catch(IOException fne) {
+            System.out.println("corrupted "+f.getAbsolutePath());
             meta.status= Status.corrupted_propoerties;
         }
 

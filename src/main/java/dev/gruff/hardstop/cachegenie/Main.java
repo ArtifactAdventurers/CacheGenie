@@ -2,6 +2,8 @@ package dev.gruff.hardstop.cachegenie;
 
 
 import dev.gruff.hardstop.treestreamer.streamers.FileSystemTreeStreamer;
+import org.eclipse.aether.artifact.Artifact;
+import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.resolution.ArtifactResult;
 import org.eclipse.aether.resolution.DependencyResolutionException;
 
@@ -15,9 +17,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalUnit;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 
 public class Main {
 
@@ -81,11 +81,25 @@ public class Main {
                 .map(Main::toMeta)
                 .forEach(m -> {
                     Instant updated=m.m.updated();
+                    if(updated==null) {
+                      //  System.out.println(m.f.getAbsolutePath()+"\n\n\n\n no updated");
+                        return;
+                    }
                     Instant generated=m.m.generated();
+                    if(generated==null) {
+                      //  System.out.println(m.f.getAbsolutePath()+"\n\n\n\n1 no gen");
+                        return;
+                    }
                     boolean inLocalScope=generated.isBefore(localInstantBoundary);
                     boolean inGlobalScope=updated.isAfter(globalInstantBoundary);
-
-                    System.out.println(m.f.getAbsolutePath()+" updated "+updated+" gen "+generated+" ils="+inLocalScope+" igs="+inGlobalScope);
+                    if(inGlobalScope ) {
+                        System.out.println(m.f.getAbsolutePath() + " updated " + updated + " gen " + generated);
+                        System.out.println("caching latest version");
+                        String ref=m.m.gid+":"+m.m.aid+":"+m.m.latest;
+                        LinkedList<String> l=new LinkedList<>();
+                        l.add(ref);
+                        cache(l);
+                    }
                 });
     }
 
@@ -163,10 +177,12 @@ public class Main {
         for (String d : args) {
             System.out.println("resolve "+d);
             try {
-                List<ArtifactResult> x= mc.resolve(d);
-                for(ArtifactResult ar:x) {
+                List<DependencyNode> x= mc.resolve(d);
 
-                    System.out.println("+ "+ar.getArtifact());
+                for(DependencyNode dn:x) {
+                    Set<String> visited=new HashSet<>();
+                    printKids(visited,0,dn);
+
                 }
             } catch (DependencyResolutionException e) {
                 throw new RuntimeException(e);
@@ -174,6 +190,32 @@ public class Main {
 
 
         }
+    }
+
+    private static void printKids(Set<String> visited,int depth, DependencyNode dn) {
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < depth; i++) {
+            sb.append(" ");
+        }
+
+        String artifactId=dn.getArtifact().getArtifactId()+"/"+dn.getArtifact().toString();
+        if(visited.isEmpty()) {
+            System.out.println("= "+artifactId);
+        } else {
+            if(!visited.contains(artifactId)) {
+                System.out.println(sb + " + " + artifactId);
+            } else {
+                System.out.println(sb + " ! " + artifactId);
+            }
+        }
+        if(!visited.contains(artifactId)) {
+            visited.add(artifactId);
+            for(DependencyNode k: dn.getChildren()) {
+                printKids(visited,depth+1,k);
+            }
+        }
+
     }
 
 

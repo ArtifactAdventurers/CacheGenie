@@ -7,6 +7,7 @@ import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.graph.DependencyFilter;
+import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.impl.DefaultServiceLocator;
 import org.eclipse.aether.repository.LocalRepository;
 import org.eclipse.aether.repository.RemoteRepository;
@@ -56,7 +57,7 @@ public class Resolver {
 
     }
 
-    public List<ArtifactResult> resolve(String d) throws DependencyResolutionException {
+    public List<DependencyNode> resolve(String d) throws DependencyResolutionException {
             if(d==null) return List.of();
             d=d.trim();
             if(d.equals("")) return List.of();
@@ -75,18 +76,18 @@ public class Resolver {
             }
     }
 
-    private List<ArtifactResult> resolveAllVersions(String group, String artifact) throws DependencyResolutionException {
+    private List<DependencyNode> resolveAllVersions(String group, String artifact) throws DependencyResolutionException {
         VersionResolver vr=new VersionResolver();
         Set<String> versions=vr.resolve(group,artifact);
-        List<ArtifactResult> results=new LinkedList<>();
+        List<DependencyNode> results=new LinkedList<>();
         for(String v:versions) {
-                List<ArtifactResult> ar=resolve0(group+":"+artifact+":"+v);
-                results.addAll(ar);
+            List<DependencyNode> dn=resolve0(group+":"+artifact+":"+v);
+                results.addAll(dn);
         }
         return results;
     }
 
-    private List<ArtifactResult> resolve0(String d)  {
+    private  List<DependencyNode> resolve0(String d)  {
 
         log.info("resolving {}",d);
 
@@ -109,15 +110,18 @@ public class Resolver {
 
         DependencyRequest dependencyRequest = new DependencyRequest(cr, classpathFilter);
 
-        List<ArtifactResult> results= new LinkedList<>();
+        DependencyNode results=null;
         try {
             DependencyResult dr = system.resolveDependencies(session, dependencyRequest);
-            results=dr.getArtifactResults();
+            results=dr.getRoot();
+            log.info("resolved {} dependencies",dr.getArtifactResults().size());
+            //results=dr.getArtifactResults();
+
         } catch (DependencyResolutionException e) {
             log.info(e.getMessage());
         }
-        log.info("resolved {} dependencies",results.size());
-        return results;
+        if(results==null) return List.of();
+        else return List.of(results);
     }
 
     public static RepositorySystem newRepositorySystem() {
