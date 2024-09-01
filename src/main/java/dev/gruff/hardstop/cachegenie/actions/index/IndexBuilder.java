@@ -1,5 +1,8 @@
-package dev.gruff.hardstop.cachegenie;
+package dev.gruff.hardstop.cachegenie.actions.index;
 
+import dev.gruff.hardstop.cachegenie.CacheGenie;
+import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MetaBuilder;
 import dev.gruff.hardstop.treestreamer.ContentType;
 import dev.gruff.hardstop.treestreamer.navigators.*;
 import dev.gruff.hardstop.treestreamer.streamers.URITreeSteamVisitorBuilder;
@@ -15,19 +18,12 @@ import static dev.gruff.hardstop.treestreamer.navigators.NavigatorPolicyBuilder.
 
 public class IndexBuilder {
 
-    final URI base;
-
-
-   final File cachegenie;
+  CacheGenie genie;
    final     NavigatorPolicy policy;
    final MetaBuilder mb;
     public IndexBuilder() throws  URISyntaxException {
-         base=new URI("https://repo1.maven.org/maven2/");
+        genie=CacheGenie.build();
         mb=MetaBuilder.newInstance();
-
-        File m2=new File(System.getProperty("user.home"),".m2");
-        cachegenie =new File(m2,"cachegenie");
-        cachegenie.mkdirs();
 
      policy= builder()
 
@@ -114,7 +110,7 @@ public class IndexBuilder {
     }
 
     private File toLocal(URI u) {
-        URI rel= base.relativize(u);
+        URI rel= genie.base().relativize(u);
         String relPath=rel.getPath();
         LinkedList<String> l=new LinkedList<>();
         l.addAll(List.of(relPath.split("/")));
@@ -123,7 +119,7 @@ public class IndexBuilder {
         String gid=String.join(".",l);
 
         String cacheFile=gid+":"+aid+".properties";
-        File c=new File(cachegenie,cacheFile);
+        File c=new File(genie.cacheGenieRoot(),cacheFile);
         return c;
     }
 

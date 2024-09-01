@@ -1,5 +1,6 @@
 package dev.gruff.hardstop.cachegenie;
 
+import dev.gruff.hardstop.cachegenie.actions.index.IndexStatus;
 import org.junit.Test;
 
 import java.io.File;

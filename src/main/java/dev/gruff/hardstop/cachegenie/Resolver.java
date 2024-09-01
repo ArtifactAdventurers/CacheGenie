@@ -118,6 +118,7 @@ public class Resolver {
             //results=dr.getArtifactResults();
 
         } catch (DependencyResolutionException e) {
+
             log.info(e.getMessage());
         }
         if(results==null) return List.of();
