@@ -1,4 +1,4 @@
-package dev.gruff.hardstop.cachegenie;
+package dev.gruff.hardstop.cachegenie.actions.index;
 
 public class IndexStats {
 

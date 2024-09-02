@@ -1,12 +1,12 @@
-package dev.gruff.hardstop.cachegenie;
+package dev.gruff.hardstop.cachegenie.actions.index;
+
+import dev.gruff.hardstop.cachegenie.Meta;
 
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Properties;
 
 public class IndexStatus {
 
@@ -35,7 +35,7 @@ public class IndexStatus {
         if(bits==null || bits.length!=2) return;
         GroupEntry s=new GroupEntry();
         s.name=name;
-        s.meta=Meta.load(f);
+        s.meta= Meta.load(f);
         stats.put(name,s);
         System.out.println("add "+s.meta.toString());
 
