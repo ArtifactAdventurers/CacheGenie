@@ -101,7 +101,7 @@ public class IndexBuilder {
             NavigatorPolicy shortPolicy = builder()
                     .rateLimit(100, Duration.ofMinutes(1))  // play nice
                     .defaultReader(new HTMLRefNavigator())
-                    .maxDepth(1)
+                    .maxDepth(2)
                     .build();
 
             URITreeSteamVisitorBuilder.newInstance(genie.base())
@@ -109,8 +109,12 @@ public class IndexBuilder {
                     .select()
                     .on(Link.class)
                     .consume(l -> {
-                        String f = URIHelper.file(l.path());
-                       toDo.add(f);
+                        String f = URIHelper.relative(genie.base(),l.path());
+                        String[] bits = f.split("/");
+                        if (bits.length > 1) {
+                            toDo.add(f);
+                            System.out.println("group "+f);
+                        }
                     })
                     .visit();
 

@@ -133,8 +133,9 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
         } else {
             return null;
         }
+
         URI lURI = URIHelper.subDirURI(base.path(), title);
-        if (lURI != null) return new LinkImpl(lURI, updated,title.endsWith("/"));
+        if (lURI != null && URIHelper.isChild(base.path(),lURI)) return new LinkImpl(lURI, updated,title.endsWith("/"));
         return null;
     }
 

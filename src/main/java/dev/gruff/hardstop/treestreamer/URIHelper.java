@@ -50,4 +50,22 @@ public class URIHelper {
         String[] bits=name.split("/");
         return bits[bits.length-1];
     }
+
+    public static String relative(URI base, URI path) {
+        String s=base.toASCIIString();
+        String p=path.toASCIIString();
+        String sub=p.substring(s.length());
+        if(sub.endsWith("/")) sub=sub.substring(0,sub.length()-1);
+
+        return sub;
+    }
+
+    public static boolean isChild(URI base,URI path) {
+        String s=base.toASCIIString().trim().toLowerCase();
+        String p=path.toASCIIString().trim().toLowerCase();
+        if(p.length()<=s.length()) return false; //child is same size or less
+        return p.startsWith(s); // child is  related to parent as it startw with same values.
+
+
+    }
 }

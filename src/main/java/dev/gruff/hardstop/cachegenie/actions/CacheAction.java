@@ -23,11 +23,13 @@ public class CacheAction {
             try {
                 List<DependencyNode> x= mc.resolve(d);
 
+                /*
                 for(DependencyNode dn:x) {
                     Set<String> visited=new HashSet<>();
                     printKids(visited,0,dn);
 
-                }
+                }*/
+
             } catch (DependencyResolutionException e) {
                 throw new RuntimeException(e);
             }
