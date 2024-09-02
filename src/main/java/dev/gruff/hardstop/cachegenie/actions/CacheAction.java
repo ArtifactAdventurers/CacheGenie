@@ -31,7 +31,9 @@ public class CacheAction {
                 }*/
 
             } catch (DependencyResolutionException e) {
-                throw new RuntimeException(e);
+                e.printStackTrace();
+            } catch(java.lang.IllegalStateException jle) {
+                jle.printStackTrace();
             }
 
 
