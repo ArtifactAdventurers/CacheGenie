@@ -38,6 +38,7 @@ public abstract class FunctionTypeReference<F, T> {
     public static void main(String[] args) {
         // Example usage with Function<String, Integer>
 
+
         Function<String,String> parser=new Function<String, String>() {
             @Override
             public String apply(String integer) {
@@ -45,6 +46,8 @@ public abstract class FunctionTypeReference<F, T> {
             }
         };
 
+        System.out.println(parser.getClass());
+        
         FunctionTypeReference typeRef = new FunctionTypeReference<>(parser) {};
 
         System.out.println("Source type (F): " + typeRef.getSourceType());

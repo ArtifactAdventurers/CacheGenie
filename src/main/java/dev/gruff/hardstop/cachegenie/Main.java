@@ -2,6 +2,7 @@ package dev.gruff.hardstop.cachegenie;
 
 
 import dev.gruff.hardstop.cachegenie.actions.CacheAction;
+import dev.gruff.hardstop.cachegenie.actions.StatsAction;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
 import dev.gruff.hardstop.cachegenie.actions.ListAction;
 import dev.gruff.hardstop.cachegenie.actions.UpdateAction;
@@ -21,7 +22,7 @@ public class Main {
         }
 
 
-        CacheGenie cg=new CacheGenie();
+        CacheGenie cg=CacheGenie.build();
         List<String> params=new LinkedList<>();
         params.addAll(List.of(args));
 
@@ -42,6 +43,10 @@ public class Main {
             case "update":
                 UpdateAction ua=new UpdateAction(cg);
                 ua.update(params);
+                break;
+            case "stats":
+                StatsAction sa=new StatsAction(cg);
+                sa.stats(params);
                 break;
             default:
                 usage();

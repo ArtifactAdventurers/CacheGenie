@@ -10,7 +10,11 @@ public class CacheGenie {
     private URI base;
     private File cachegenie;
     private File repoRoot;
+    private File cacheWork;
 
+    private CacheGenie() {
+
+    }
     public static CacheGenie build() throws URISyntaxException {
         CacheGenie cg=new CacheGenie();
         cg.base=new URI("https://repo1.maven.org/maven2/");
@@ -19,6 +23,8 @@ public class CacheGenie {
         cg.repoRoot=new File(m2,"repository");
         cg.cachegenie =new File(m2,"cachegenie");
         cg.cachegenie.mkdirs();
+        cg.cacheWork=new File(cg.cachegenie,"work");
+        cg.cacheWork.mkdirs();
 
         return cg;
     }
@@ -27,7 +33,9 @@ public class CacheGenie {
         return base;
     }
 
-
+    public File work() {
+        return cacheWork;
+    }
     public File repoRoot() {
         return repoRoot;
     }

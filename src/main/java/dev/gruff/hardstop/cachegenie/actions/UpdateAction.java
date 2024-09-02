@@ -41,6 +41,7 @@ public class UpdateAction {
         System.out.println("local boundary "+localInstantBoundary+" files updated on local cache after this date are ignored");
         System.out.println("global  boundary "+globalInstantBoundary+" files last updated on repo before this date are ignored");
         File f=cg.cacheGenieRoot();
+        System.out.println("root "+f.toPath());
         Files.list(f.toPath()).filter(p -> { return p.toFile().isFile() && p.toFile().getName().endsWith(".properties");})
                 .map(UpdateAction::toMeta)
                 .forEach(m -> {
