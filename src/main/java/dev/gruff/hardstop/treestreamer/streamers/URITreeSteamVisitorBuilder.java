@@ -42,6 +42,10 @@ public final class URITreeSteamVisitorBuilder {
                 return new OtherwiseStreamConfig();
             }
 
+            public void visit() {
+                Configurator.this.visit();
+            }
+
             public class OtherwiseStreamConfig {
                 public <X> Configurator consume(Consumer<X> x) {
                     Configurator.this.setOtherwise(x);

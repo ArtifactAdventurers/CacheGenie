@@ -4,13 +4,17 @@ import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.Meta;
 import dev.gruff.hardstop.cachegenie.MetaBuilder;
 import dev.gruff.hardstop.treestreamer.ContentType;
+import dev.gruff.hardstop.treestreamer.URIHelper;
 import dev.gruff.hardstop.treestreamer.navigators.*;
 import dev.gruff.hardstop.treestreamer.streamers.URITreeSteamVisitorBuilder;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.*;
 
@@ -23,6 +27,7 @@ public class IndexBuilder {
    final MetaBuilder mb;
     public IndexBuilder() throws  URISyntaxException {
         genie=CacheGenie.build();
+
         mb=MetaBuilder.newInstance();
 
      policy= builder()
@@ -59,11 +64,86 @@ public class IndexBuilder {
             args.add("");
         }
 
-        for(String arg:args) {
-            arg=arg.trim();
-            index(arg);
+        if(args.get(0).equalsIgnoreCase("?")) {
+
+            try {
+                randomWalk();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        } else {
+            for (String arg : args) {
+                arg = arg.trim();
+                index(arg);
+            }
         }
 
+    }
+
+    private void randomWalk() throws IOException {
+
+        // randomise...
+        File list=new File(genie.work(),"index_build");
+        List<String> lines;
+        if(list.exists()) {
+             lines=Files.readAllLines(list.toPath());
+        }
+        else {
+            lines=new LinkedList<>();
+        }
+        Set<String> toDo=new HashSet<>();
+        toDo.addAll(lines);
+
+        // todo shows what's leftto do.
+        if(toDo.isEmpty()) {
+
+
+            NavigatorPolicy shortPolicy = builder()
+                    .rateLimit(100, Duration.ofMinutes(1))  // play nice
+                    .defaultReader(new HTMLRefNavigator())
+                    .maxDepth(2)
+                    .build();
+
+            URITreeSteamVisitorBuilder.newInstance(genie.base())
+                    .policy(shortPolicy)
+                    .select()
+                    .on(Link.class)
+                    .consume(l -> {
+                        String f = URIHelper.relative(genie.base(),l.path());
+                        String[] bits = f.split("/");
+                        if (bits.length > 1) {
+                            toDo.add(f);
+                            System.out.println("group "+f);
+                        }
+                    })
+                    .visit();
+
+        }
+
+        System.out.println("=== IB TODO "+toDo.size());
+       Iterator<String> i=toDo.iterator();
+        while(i.hasNext()) {
+            String key=i.next();
+            System.out.println("=== IB ==== > "+key+" ("+toDo.size());
+            index(key);
+            i.remove();
+            writeToDo(list,toDo);
+
+        }
+
+    }
+
+    private void writeToDo(File list, Set<String> toDo)  {
+
+        try(FileWriter fw=new FileWriter(list)) {
+            PrintWriter pw = new PrintWriter(fw);
+            for (String s : toDo) {
+                pw.println(s);
+                pw.flush();
+            }
+        } catch(IOException ioe) {
+            ioe.printStackTrace();
+        }
 
     }
 

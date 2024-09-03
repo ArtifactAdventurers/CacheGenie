@@ -1,5 +1,10 @@
 package dev.gruff.hardstop.play;
 
+import dev.gruff.hardstop.api.HSClass;
+import dev.gruff.hardstop.core.builder.ClassReader;
+import dev.gruff.hardstop.core.internal.Utils;
+
+import java.io.IOException;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.function.Function;
@@ -9,6 +14,9 @@ public abstract class FunctionTypeReference<F, T> {
     private final Type targetType;
     private final Function<F, T> converter;
 
+    public T convert(F f) {
+        return converter.apply(f);
+    }
     protected FunctionTypeReference(Function<F, T> converter) {
         this.converter = converter;
         // Get the generic superclass (FunctionTypeReference<F, T>)
@@ -23,20 +31,9 @@ public abstract class FunctionTypeReference<F, T> {
         }
     }
 
-    public Type getSourceType() {
-        return this.sourceType;
-    }
-
-    public Type getTargetType() {
-        return this.targetType;
-    }
-
-    public Function<F, T> getConverter() {
-        return converter;
-    }
-
     public static void main(String[] args) {
         // Example usage with Function<String, Integer>
+
 
         Function<String,String> parser=new Function<String, String>() {
             @Override
@@ -45,14 +42,38 @@ public abstract class FunctionTypeReference<F, T> {
             }
         };
 
+
+
         FunctionTypeReference typeRef = new FunctionTypeReference<>(parser) {};
 
-        System.out.println("Source type (F): " + typeRef.getSourceType());
-        System.out.println("Target type (T): " + typeRef.getTargetType());
 
-        // Example of using the converter function
-      //  Function<String, Integer> converter = typeRef.getConverter();
-      //  Integer length = converter.apply("Hello");
-      //  System.out.println("Converted result: " + length);
+        try {
+
+
+            HSClass z= ClassReader.readClass(typeRef.getClass());
+            System.out.println(z);
+            System.out.println(z.type());
+            System.out.println(z.isInnerClass());
+            z.methods().forEach(m -> {
+                System.out.println("m "+m.name());
+                System.out.println("m "+m.descriptor());
+            });
+
+            System.out.println("===");
+
+            z= ClassReader.readClass(FunctionTypeReference.class);
+            System.out.println("c n "+z.className());
+            System.out.println("c t "+z.type());
+            System.out.println("c i "+z.isInnerClass());
+            z.methods().forEach(m -> {
+
+                System.out.println("m r "+m.reference());
+                System.out.println("m a "+ Utils.methodAccessFlags(m.accessFlags()));
+
+            });
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

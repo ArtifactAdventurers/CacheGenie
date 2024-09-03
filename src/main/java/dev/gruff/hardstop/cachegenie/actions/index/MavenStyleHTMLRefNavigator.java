@@ -53,6 +53,17 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
                 });
 
 
+        // if we encountered a pom file then we've sort of gone
+        // to far and missed the likely meta file
+        boolean pom=false;
+        for(String n:contents.keySet()) {
+            if(n!=null && n.endsWith(".pom")) {
+                pom=true;
+                break;
+            }
+        }
+        if(pom) return new LinkSetImpl();
+
         // if we encountered the metadata link then we'll
         // convet into a meta object
 
@@ -122,8 +133,9 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
         } else {
             return null;
         }
+
         URI lURI = URIHelper.subDirURI(base.path(), title);
-        if (lURI != null) return new LinkImpl(lURI, updated,title.endsWith("/"));
+        if (lURI != null && URIHelper.isChild(base.path(),lURI)) return new LinkImpl(lURI, updated,title.endsWith("/"));
         return null;
     }
 
