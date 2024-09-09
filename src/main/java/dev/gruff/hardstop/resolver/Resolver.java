@@ -1,5 +1,6 @@
 package dev.gruff.hardstop.resolver;
 
+import dev.gruff.hardstop.cachegenie.CacheGenie;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.*;
 import org.eclipse.aether.artifact.DefaultArtifact;
@@ -34,9 +35,19 @@ public class Resolver {
     private final RepositorySystem system = newRepositorySystem();
     private final  DefaultRepositorySystemSession session;
     private LocalRepository localRepo;
+    private List<RemoteRepository> rrlist;
 
-    public Resolver() {
-        this(new LocalRepository(localRepo()));
+    public Resolver(CacheGenie cg) {
+
+        this.localRepo=new LocalRepository(cg.repoRoot());
+        session=MavenRepositorySystemUtils.newSession();
+        session.setRepositoryListener(new RepositoryListener(this) {
+        });
+
+        RemoteRepository rr=new RemoteRepository.Builder("central", "default", cg.base().toASCIIString()).build();
+       rrlist =new LinkedList<>();
+        rrlist.add(rr);
+
     }
 
     private static File localRepo() {
@@ -47,13 +58,6 @@ public class Resolver {
         return repo;
     }
 
-    public Resolver(LocalRepository localRepo) {
-        this.localRepo=localRepo;
-        session=MavenRepositorySystemUtils.newSession();
-        session.setRepositoryListener(new RepositoryListener(this) {
-        });
-
-    }
 
     public List<DependencyNode> resolve(String d) throws DependencyResolutionException {
             if(d==null) return List.of();
@@ -95,9 +99,9 @@ public class Resolver {
 
         Dependency dependency = new Dependency(new DefaultArtifact(d), JavaScopes.COMPILE);
 
-        RemoteRepository rr=new RemoteRepository.Builder("central", "default", "https://repo1.maven.org/maven2/").build();
-        List<RemoteRepository> rrlist=new LinkedList<>();
-        rrlist.add(rr);
+       // RemoteRepository rr=new RemoteRepository.Builder("central", "default", "https://repo1.maven.org/maven2/").build();
+       // List<RemoteRepository> rrlist=new LinkedList<>();
+       // rrlist.add(rr);
 
         CollectRequest cr=new CollectRequest(dependency,rrlist);
         //CollectRequest collectRequest = new CollectRequest();
@@ -137,5 +141,15 @@ public class Resolver {
         });
 
         return locator.getService(RepositorySystem.class);
+    }
+
+    public DependencyTree resolveTree(String group, String artifact, String v) {
+
+        List<DependencyNode> dn=resolve0(group+":"+artifact+":"+v);
+        if(dn.isEmpty()) return new DependencyTree() {};
+
+        return null;
+
+
     }
 }

@@ -16,7 +16,7 @@ public class CacheAction {
 
      public void cache(List<String> args) {
 
-        Resolver mc = new Resolver();
+        Resolver mc = new Resolver(cg);
         for (String d : args) {
             System.out.println("resolve "+d);
             try {
