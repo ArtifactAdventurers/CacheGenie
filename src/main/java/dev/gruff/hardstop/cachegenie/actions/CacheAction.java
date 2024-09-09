@@ -1,11 +1,10 @@
 package dev.gruff.hardstop.cachegenie.actions;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.Resolver;
+import dev.gruff.hardstop.resolver.Resolver;
 import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.resolution.DependencyResolutionException;
 
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 

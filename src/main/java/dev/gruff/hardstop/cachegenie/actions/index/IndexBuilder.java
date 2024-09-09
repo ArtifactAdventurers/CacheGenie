@@ -25,9 +25,8 @@ public class IndexBuilder {
   CacheGenie genie;
    final     NavigatorPolicy policy;
    final MetaBuilder mb;
-    public IndexBuilder() throws  URISyntaxException {
-        genie=CacheGenie.build();
-
+    public IndexBuilder(CacheGenie cg) {
+        genie=cg;
         mb=MetaBuilder.newInstance();
 
      policy= builder()
@@ -155,15 +154,15 @@ public class IndexBuilder {
         URI root= URI.create("https://"+url);
 
         URITreeSteamVisitorBuilder.newInstance(root)
-                .policy(policy) // use maven repo search policy
+                .policy(policy)
                 .select()
-                    .on(Meta.class)// for fond meta files
+                    .on(Meta.class)
                         .consume(m -> handleMeta(m))
-                    .on(LinkSetImpl.class) // for found html links - print the paths
+                    .on(LinkSetImpl.class)
                         .consume(s -> s.stream().forEach(k -> System.out.println("ls:"+k.path())))
                 .on(Link.class)
-                .consume(l -> System.out.println("file: "+l.path().toASCIIString())) // print it
-                    .otherwise()// for everything else
+                .consume(l -> System.out.println("file: "+l.path().toASCIIString()))
+                    .otherwise()
                         .consume(o -> {System.out.println("other:"+o);})
                 .visit();
 
@@ -197,15 +196,44 @@ public class IndexBuilder {
         l.removeLast(); // drop name
         String aid=l.removeLast();
         String gid=String.join(".",l);
+        return toFile(gid,aid);
 
+    }
+
+    private File toFile(String gid, String aid) {
         String cacheFile=gid+":"+aid+".properties";
         File c=new File(genie.cacheGenieRoot(),cacheFile);
         return c;
     }
 
 
+    public Meta meta(String gid, String aid) {
 
+        File f=toFile(gid,aid);
+        if(f!=null && f.isFile() && f.exists()) return Meta.load(f);
 
+       URI file= URIHelper.subDirURI(genie.base(),gid.replace(".","/")+"/"+aid);
 
+        NavigatorPolicy shortPolicy = builder()
+                .rateLimit(100, Duration.ofMinutes(1))  // play nice
+                .defaultReader(new MavenStyleHTMLRefNavigator(mb))
+                .maxDepth(1)
+                .build();
+
+        final List<Meta> metas=new LinkedList<>();
+        URITreeSteamVisitorBuilder.newInstance(file)
+                .policy(shortPolicy)
+                .select()
+                .on(Meta.class)
+                .consume(m -> {
+                    System.out.println("read "+m);
+                    handleMeta(m); // save it
+                    metas.add(m);
+                })
+                .visit();
+
+        if(metas.isEmpty()) return null;
+        return metas.get(0);
+    }
 }
 

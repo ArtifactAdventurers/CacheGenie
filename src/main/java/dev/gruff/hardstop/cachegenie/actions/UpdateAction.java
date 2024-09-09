@@ -72,7 +72,7 @@ public class UpdateAction {
     private record Entry(File f, Meta m){}
 
 
-    private static Entry toMeta(Path f) {
+    static Entry toMeta(Path f) {
         File file=f.toFile();
         return new Entry(file,Meta.load(file));
     }

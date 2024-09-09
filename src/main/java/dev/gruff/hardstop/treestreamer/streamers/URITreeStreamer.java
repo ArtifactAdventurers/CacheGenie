@@ -12,7 +12,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
-public abstract sealed class URITreeStreamer  implements TreeStreamer permits URITreeSteamVisitorBuilder.InternalURITreeStreamer {
+public abstract sealed class URITreeStreamer  implements TreeStreamer<Object> permits URITreeSteamVisitorBuilder.InternalURITreeStreamer {
 
 
     private final Link root;

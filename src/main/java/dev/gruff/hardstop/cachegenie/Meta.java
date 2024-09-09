@@ -11,9 +11,24 @@ import java.util.*;
 
 public class Meta {
 
-    static class Version {
+    public MetaVersionSet versions() {
+
+        MetaVersionSet mv=new MetaVersionSet(versions.values());
+        return mv;
+
+    }
+
+    public static class Version {
         String version;
        Instant updated;
+
+
+       public Instant date() {
+           return updated;
+       }
+       public String value() {
+           return version;
+       }
     }
 
     private Meta() {

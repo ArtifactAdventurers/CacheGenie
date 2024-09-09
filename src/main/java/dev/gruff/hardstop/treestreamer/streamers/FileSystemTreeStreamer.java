@@ -4,19 +4,19 @@ import java.io.File;
 import java.util.Arrays;
 import java.util.stream.Stream;
 
-public abstract sealed class FileSystemTreeStreamer implements TreeStreamer permits  FileSystemTreeStreamer.InternalFileSystemTreeStreamer {
-   private File root;
+public abstract sealed class FileSystemTreeStreamer implements TreeStreamer<File> permits  FileSystemTreeStreamer.InternalFileSystemTreeStreamer {
+   private final File root;
    private boolean suppressDirs=false;
     public FileSystemTreeStreamer(File froot) {
         this.root=froot;
     }
 
     @Override
-    public Stream<Object> stream() {
+    public Stream<File> stream() {
         return expand(root);
     }
 
-    private Stream<Object> expand(File r) {
+    private Stream<File> expand(File r) {
 
         if(r==null) return Stream.empty();
         File[] kids=r.listFiles();
