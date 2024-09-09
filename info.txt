@@ -1,0 +1,2 @@
+rsync -az -e ssh spoole@rock:/home/spoole/.m2/ /Volumes/repo/.m2
+df -H
