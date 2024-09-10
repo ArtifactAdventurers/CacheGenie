@@ -1,8 +1,10 @@
 package dev.gruff.hardstop.resolver;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
+import dev.gruff.hardstop.cachegenie.graph.GraphBuilder;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.*;
+import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory;
@@ -24,6 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
@@ -143,13 +146,12 @@ public class Resolver {
         return locator.getService(RepositorySystem.class);
     }
 
-    public DependencyTree resolveTree(String group, String artifact, String v) {
 
-        List<DependencyNode> dn=resolve0(group+":"+artifact+":"+v);
-        if(dn.isEmpty()) return new DependencyTree() {};
-
-        return null;
-
-
+    public DependencySet resolveGraph(String gid, String aid, String first) {
+        List<DependencyNode> roots=resolve0(gid+":"+aid+":"+first);
+        return DependencyBuilder
+                .newInstance()
+                .addDependencies(roots)
+                .build();
     }
 }

@@ -1,7 +1,7 @@
 package dev.gruff.hardstop.cachegenie.actions;
 
+import dev.gruff.hardstop.api.HSClass;
 import dev.gruff.hardstop.api.SemanticVersion;
-import dev.gruff.hardstop.api.artifacts.HSClass;
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.Meta;
 import dev.gruff.hardstop.treestreamer.streamers.FileSystemTreeStreamer;

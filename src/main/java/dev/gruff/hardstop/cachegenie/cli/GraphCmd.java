@@ -4,7 +4,8 @@ import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.Meta;
 import dev.gruff.hardstop.cachegenie.MetaVersionSet;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
-import dev.gruff.hardstop.resolver.DependencyTree;
+import dev.gruff.hardstop.cachegenie.graph.DotViz;
+import dev.gruff.hardstop.resolver.DependencySet;
 import dev.gruff.hardstop.resolver.Resolver;
 import picocli.CommandLine;
 
@@ -64,9 +65,9 @@ public class GraphCmd implements Runnable {
 
         Resolver r=new Resolver(cg);
 
-        DependencyTree t=r.resolveTree(gid,aid,versionTargets.getFirst());
+        DependencySet set=r.resolveGraph(gid,aid,versionTargets.getFirst());
 
-
+        DotViz.viz(System.out,set);
 
         System.exit(0);
     }
