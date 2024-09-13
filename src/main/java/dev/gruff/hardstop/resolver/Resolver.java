@@ -1,7 +1,9 @@
 package dev.gruff.hardstop.resolver;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.graph.GraphBuilder;
+
+import dev.gruff.hardstop.cachegenie.entities.ArtifactRef;
+import dev.gruff.hardstop.cachegenie.utils.ObjectChecks;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.*;
 import org.eclipse.aether.artifact.Artifact;
@@ -35,30 +37,64 @@ public class Resolver {
 
     private static final Logger log = LoggerFactory.getLogger(Resolver.class);
 
-    private final RepositorySystem system = newRepositorySystem();
+    private final RepositorySystem system;
     private final  DefaultRepositorySystemSession session;
-    private LocalRepository localRepo;
-    private List<RemoteRepository> rrlist;
+    private final LocalRepository localRepo;
+    private final List<RemoteRepository> rrlist;
 
-    public Resolver(CacheGenie cg) {
+    public ArtifactRef resolveArtifact(String s) {
+        try {
+            List<DependencyNode> results= resolve(s);
+            if(results==null || results.isEmpty()) return null;
+            DependencyNode dn=results.getFirst();
+            Artifact a=dn.getArtifact();
+            File code=a.getFile();
+            if(code!=null) {
+                return ArtifactRef.create(a.getGroupId(),a.getArtifactId(),a.getVersion(),code);
+            }
+
+            return ArtifactRef.create(a.getGroupId(),a.getArtifactId(),a.getVersion());
+
+        } catch (DependencyResolutionException e) {
+         e.printStackTrace();
+         return null;
+        }
+    }
+
+    private static class RepoConfig {
+        private String name;
+        private String type;
+        private String uri;
+    }
+    private Resolver(CacheGenie cg, Set<RepoConfig> repos, boolean localOnly) {
 
         this.localRepo=new LocalRepository(cg.repoRoot());
+        this.system= newRepositorySystem();
+
         session=MavenRepositorySystemUtils.newSession();
         session.setRepositoryListener(new RepositoryListener(this) {
         });
 
-        RemoteRepository rr=new RemoteRepository.Builder("central", "default", cg.base().toASCIIString()).build();
-       rrlist =new LinkedList<>();
-        rrlist.add(rr);
+        rrlist = new LinkedList<>();
 
-    }
+        if(!localOnly) {
 
-    private static File localRepo() {
-        File root=new File(System.getProperty("user.home"));
-        File m2=new File(root,".m2");
-        File repo=new File(m2,"repository");
-        repo.mkdirs();
-        return repo;
+
+            if (repos != null && !repos.isEmpty()) {
+                for (RepoConfig c : repos) {
+                    RemoteRepository rr = new RemoteRepository.Builder(c.name, c.type, c.uri).build();
+                    rrlist.add(rr);
+                }
+            } else {
+                RemoteRepository rr = new RemoteRepository.Builder("central", "default", cg.base().toASCIIString()).build();
+                rrlist.add(rr);
+            }
+        }
+
+
+
+
+
     }
 
 
@@ -130,7 +166,7 @@ public class Resolver {
         else return List.of(results);
     }
 
-    public static RepositorySystem newRepositorySystem() {
+    private static RepositorySystem newRepositorySystem() {
         DefaultServiceLocator locator = MavenRepositorySystemUtils.newServiceLocator();
         locator.addService(RepositoryConnectorFactory.class, BasicRepositoryConnectorFactory.class);
         locator.addService(TransporterFactory.class, FileTransporterFactory.class);
@@ -153,5 +189,27 @@ public class Resolver {
                 .newInstance()
                 .addDependencies(roots)
                 .build();
+    }
+
+    public static ResolverBuilder Builder(CacheGenie cg) {
+        return new ResolverBuilder(cg);
+    }
+    public static class ResolverBuilder {
+        private CacheGenie genie=null;
+        private boolean localOnly=false;
+        private Set<RepoConfig> repos=new HashSet<>();
+        private ResolverBuilder(CacheGenie cg) {
+            ObjectChecks.isPresent("cg",cg);
+            this.genie=cg;
+        }
+
+        public ResolverBuilder localOnly() {
+            this.localOnly=true;
+            return this;
+        }
+        public Resolver build() {
+            Resolver r=new Resolver(genie,repos,localOnly);
+            return r;
+        }
     }
 }

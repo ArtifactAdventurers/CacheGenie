@@ -4,6 +4,7 @@ import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.Meta;
 import dev.gruff.hardstop.cachegenie.MetaVersionSet;
 
+import dev.gruff.hardstop.cachegenie.actions.CompareAction;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
 import picocli.CommandLine;
 
@@ -63,6 +64,15 @@ public class CompareCmd implements Runnable {
         System.out.println("aid "+aid);
         System.out.println("comparing versions "+versions);
 
+        CompareAction ca=new CompareAction(cg);
+
+        final Meta.Version[] last = {null};
+        versions.stream().forEach( mv -> {
+            if(last[0] !=null) {
+                ca.compareVersions(gid,aid,last[0],mv);
+            }
+            last[0] =mv;
+        });
 
         System.exit(0);
     }

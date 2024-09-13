@@ -3,8 +3,15 @@ import org.apache.logging.log4j.util.Strings;
 
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Stream;
 
 public class MetaVersionSet {
+
+    public Stream<Meta.Version> stream() {
+
+        return sequenced.stream().map(e -> { return e.version;});
+
+    }
 
     private static class Entry {
         Instant date;
