@@ -21,7 +21,7 @@ public abstract sealed class AbstractNavigatorPolicy implements NavigatorPolicy 
     private RateLimiter rateLimiter;
 
 
-    private List<Selector> selectors=new LinkedList<>();
+    private final List<Selector> selectors=new LinkedList<>();
     private LinkReader defaultHandler;
 
     public boolean belowDepth(int depth) {
@@ -42,47 +42,45 @@ public abstract sealed class AbstractNavigatorPolicy implements NavigatorPolicy 
    static class Selector {
         Predicate<Link> pred;
         LinkReader parser;
-        Function transformer;
+        private Function<Object, Object> transformer;
 
         public boolean canHandle(Connection.Response r) {
+            final URI uri;
+            try {
+                uri = r.url().toURI();
+            } catch (URISyntaxException e) {
+                // If the response URL cannot be converted to a URI, this selector cannot handle it
+                return false;
+            }
 
-            Link l=new Link() {
-
-
+            Link l = new Link() {
                 @Override
                 public URI path() {
-                    try {
-                        return r.url().toURI();
-                    } catch (URISyntaxException e) {
-                       System.out.println(e);
-                    }
-                    return null;
+                    return uri;
                 }
 
                 @Override
                 public boolean isType(ContentType contentType) {
-                    return contentType.match(r.contentType());
+                    return contentType != null && contentType.match(r.contentType());
                 }
             };
-            return pred.test(l);
+            try {
+                return pred != null && pred.test(l);
+            } catch (RuntimeException ex) {
+                // Defensive: if the predicate throws due to unexpected input, treat as non-match
+                return false;
+            }
         }
 
-
-
-
-
-       public <F, T> void setTransformer(Function<F,T> t) {
-
-
-                   transformer=t;
-       }
+        public void setTransformer(Function<? super Object, ? extends Object> t) {
+            this.transformer = (t == null) ? null : o -> t.apply(o);
+        }
    }
 
     @Override
     public LinkReader handler(Connection.Response r) {
         if(selectors.isEmpty()) {
-
-            return defaultHandler;
+            return (defaultHandler != null) ? defaultHandler : (uri, in) -> new LinkSetImpl();
         }
         for(Selector s:selectors) {
             if(s.canHandle(r)) {
@@ -100,7 +98,7 @@ public abstract sealed class AbstractNavigatorPolicy implements NavigatorPolicy 
             }
         }
 
-        return defaultHandler;
+        return (defaultHandler != null) ? defaultHandler : (uri, in) -> new LinkSetImpl();
     }
 
    Selector addSelector(Predicate<Link> pred, LinkReader parser) {
