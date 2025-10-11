@@ -1,7 +1,7 @@
 package dev.gruff.hardstop.cachegenie.actions;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
 
 import java.io.File;
 import java.io.IOException;
@@ -69,11 +69,11 @@ public class UpdateAction {
                 });
     }
 
-    private record Entry(File f, Meta m){}
+    private record Entry(File f, MavenMetaData m){}
 
 
     static Entry toMeta(Path f) {
         File file=f.toFile();
-        return new Entry(file,Meta.load(file));
+        return new Entry(file, MavenMetaData.load(file));
     }
 }

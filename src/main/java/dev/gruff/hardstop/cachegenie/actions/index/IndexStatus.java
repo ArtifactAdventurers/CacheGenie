@@ -1,6 +1,6 @@
 package dev.gruff.hardstop.cachegenie.actions.index;
 
-import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
 
 import java.io.File;
 import java.io.IOException;
@@ -35,7 +35,7 @@ public class IndexStatus {
         if(bits==null || bits.length!=2) return;
         GroupEntry s=new GroupEntry();
         s.name=name;
-        s.meta= Meta.load(f);
+        s.meta= MavenMetaData.load(f);
         stats.put(name,s);
         System.out.println("add "+s.meta.toString());
 
@@ -45,6 +45,6 @@ public class IndexStatus {
     private static class GroupEntry {
 
         public String name;
-        public Meta meta;
+        public MavenMetaData meta;
     }
 }

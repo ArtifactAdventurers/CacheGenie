@@ -6,10 +6,9 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.net.URI;
 import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 
-public class Meta {
+public class MavenMetaData {
 
     public MetaVersionSet versions() {
 
@@ -31,10 +30,10 @@ public class Meta {
        }
     }
 
-    private Meta() {
+    private MavenMetaData() {
 
     }
-    public Meta(URI u) {
+    public MavenMetaData(URI u) {
         this.uri=u;
     }
     public URI uri;
@@ -99,8 +98,8 @@ public class Meta {
         return sb.toString();
     }
 
-    public static Meta load(File f) {
-        Meta meta=new Meta();
+    public static MavenMetaData load(File f) {
+        MavenMetaData meta=new MavenMetaData();
         Properties p=new Properties();
         try( FileReader fr=new FileReader(f)) {
             p.load(fr);

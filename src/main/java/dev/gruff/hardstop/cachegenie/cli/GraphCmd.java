@@ -1,7 +1,7 @@
 package dev.gruff.hardstop.cachegenie.cli;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.cachegenie.MetaVersionSet;
 import dev.gruff.hardstop.cachegenie.actions.CacheAction;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
@@ -74,8 +74,8 @@ public class GraphCmd  {
             // unles its the first one in which case we'll bail.
 
             if (depops.versionTargets.size() == 1) {
-                Meta.Version mv = versions.version(depops.versionTargets.get(0));
-                Meta.Version prev = versions.previous(mv.value());
+                MavenMetaData.Version mv = versions.version(depops.versionTargets.get(0));
+                MavenMetaData.Version prev = versions.previous(mv.value());
                 if (prev != null) depops.versionTargets.addFirst(mv.value());
                 else {
                     System.out.println("no prior version for" + mv.value());

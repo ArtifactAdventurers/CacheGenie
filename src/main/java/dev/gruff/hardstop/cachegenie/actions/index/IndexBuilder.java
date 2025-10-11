@@ -1,8 +1,8 @@
 package dev.gruff.hardstop.cachegenie.actions.index;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.Meta;
-import dev.gruff.hardstop.cachegenie.MetaBuilder;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
+import dev.gruff.hardstop.cachegenie.MavenMetaDataFactory;
 import dev.gruff.hardstop.treestreamer.ContentType;
 import dev.gruff.hardstop.treestreamer.URIHelper;
 import dev.gruff.hardstop.treestreamer.navigators.*;
@@ -23,10 +23,10 @@ public class IndexBuilder {
 
   CacheGenie genie;
    final     NavigatorPolicy policy;
-   final MetaBuilder mb;
+   final MavenMetaDataFactory mb;
     public IndexBuilder(CacheGenie cg) {
         genie=cg;
-        mb=MetaBuilder.newInstance();
+        mb= MavenMetaDataFactory.newInstance();
 
      policy= builder()
 
@@ -34,7 +34,7 @@ public class IndexBuilder {
                 .defaultReader(new HTMLRefNavigator()) // turn html docs into linksets
 
                 .onMatch(ContentType.HTML)// when HTML
-                  .and(this::checkPath)
+                  .and(IndexBuilder::checkPath)
                   .useReader(new MavenStyleHTMLRefNavigator(mb)) // parse with maven-aware parser
 
               .build();
@@ -42,7 +42,7 @@ public class IndexBuilder {
 
     }
 
-    private boolean checkPath(Link l) {
+    private static boolean checkPath(Link l) {
 
         return l.path().toASCIIString().endsWith("/");// and it looks like a directory
     }
@@ -152,7 +152,7 @@ public class IndexBuilder {
         URITreeSteamVisitorBuilder.newInstance(root)
                 .policy(policy)
                 .select()
-                    .on(Meta.class)
+                    .on(MavenMetaData.class)
                         .consume(m -> handleMeta(m))
                     .on(LinkSetImpl.class)
                         .consume(s -> s.stream().forEach(k -> System.out.println("ls:"+k.path())))
@@ -164,7 +164,7 @@ public class IndexBuilder {
 
     }
 
-    private void handleMeta(Meta m) {
+    private void handleMeta(MavenMetaData m) {
 
             if(m.uri==null) {
                 System.out.println("meta has no uri");
@@ -203,10 +203,10 @@ public class IndexBuilder {
     }
 
 
-    public Meta meta(String gid, String aid) {
+    public MavenMetaData meta(String gid, String aid) {
 
         File f=toFile(gid,aid);
-        if(f!=null && f.isFile() && f.exists()) return Meta.load(f);
+        if(f!=null && f.isFile() && f.exists()) return MavenMetaData.load(f);
 
        URI file= URIHelper.subDirURI(genie.base(),gid.replace(".","/")+"/"+aid);
 
@@ -216,11 +216,11 @@ public class IndexBuilder {
                 .maxDepth(1)
                 .build();
 
-        final List<Meta> metas=new LinkedList<>();
+        final List<MavenMetaData> metas=new LinkedList<>();
         URITreeSteamVisitorBuilder.newInstance(file)
                 .policy(shortPolicy)
                 .select()
-                .on(Meta.class)
+                .on(MavenMetaData.class)
                 .consume(m -> {
                     System.out.println("read "+m);
                     handleMeta(m); // save it

@@ -5,36 +5,41 @@ import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 import org.xml.sax.SAXException;
 
+import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.MalformedURLException;
 import java.net.URI;
-import java.util.LinkedList;
 import java.util.TreeMap;
 
-public class MetaBuilder {
+public final class MavenMetaDataFactory {
 
-    final DocumentBuilder docBuilder;
+    final DocumentBuilder db;
 
-    private MetaBuilder()  {
+    private MavenMetaDataFactory()  {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         try {
-            docBuilder = factory.newDocumentBuilder();
+            // Harden parser against XXE and related attacks
+            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            try { factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); } catch (ParserConfigurationException ignored) {}
+            try { factory.setFeature("http://xml.org/sax/features/external-general-entities", false); } catch (ParserConfigurationException ignored) {}
+            try { factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false); } catch (ParserConfigurationException ignored) {}
+            factory.setXIncludeAware(false);
+            factory.setExpandEntityReferences(false);
+
+            db = factory.newDocumentBuilder();
         } catch (ParserConfigurationException e) {
             throw new RuntimeException(e);
         }
     }
-    public static MetaBuilder newInstance() {
-        return new MetaBuilder();
-    }
-   public  Meta build(URI u) {
-            return toDepsList(docBuilder,u);
+    public static MavenMetaDataFactory newInstance() {
+        return new MavenMetaDataFactory();
     }
 
-    private  Meta toDepsList(DocumentBuilder db, URI u) {
+   public MavenMetaData create(URI u) throws IOException{
+
         try (InputStream is=u.toURL().openStream()) {
             Document xmldoc = db.parse(is);
 
@@ -45,19 +50,17 @@ public class MetaBuilder {
             Element aid=getKid(root,"artifactId");
             if(aid==null) return null;
 
-            Meta m=new Meta(u);
+            MavenMetaData m=new MavenMetaData(u);
             m.gid=getText(gid);
             m.aid=aid.getTextContent();
             m.versions=new TreeMap<>();
             Element vers=getKid(root,"versioning");
             if(vers!=null) {
-                //dumpElement(vers);
                 Element latest=getKid(vers,"latest");
                 if(latest!=null) m.latest=latest.getTextContent();
 
                 Element release=getKid(vers,"release");
                 if(release!=null) m.release=release.getTextContent();
-             //   System.out.println(m.latest+"/"+m.release+"//"+vers);
                 Element lastUpdated=getKid(vers,"lastUpdated");
                 if(lastUpdated!=null) m.updated(lastUpdated.getTextContent());
 
@@ -67,23 +70,19 @@ public class MetaBuilder {
                     NodeList versions=vlist.getElementsByTagName("version");
                     for(int i=0;i<versions.getLength();i++) {
                         String v=versions.item(i).getTextContent();
-                        Meta.Version mvers=new Meta.Version();
+                        MavenMetaData.Version mvers=new MavenMetaData.Version();
                         mvers.version=v;
                         mvers.updated=null;
                         m.versions.put(v,mvers);
                     }
-                    return m;
                 }
             }
-        } catch (MalformedURLException e) {
-            System.out.println(e);
-        } catch (IOException e) {
-            System.out.println(e);
-        } catch (SAXException e) {
-            System.out.println(e);
-        }
+            // Always return the meta if we found gid/aid
+            return m;
 
-        return null;
+        } catch (SAXException e) {
+           throw new IOException(e);
+        }
     }
 
     private String getText(Element e) {
@@ -112,8 +111,7 @@ public class MetaBuilder {
         if(nl.getLength() == 0) return null;
         for(int i=0;i<nl.getLength();i++) {
             var c=nl.item(i);
-            if(c instanceof Element) {
-                Element kid= (Element) c;
+            if(c instanceof Element kid) {
                 if(kid.getTagName().equalsIgnoreCase(tag)) return kid;
 
             }

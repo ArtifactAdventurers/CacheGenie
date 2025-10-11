@@ -1,7 +1,7 @@
 package dev.gruff.hardstop.cachegenie.actions.index;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.cachegenie.MetaVersionSet;
 
 import javax.xml.parsers.ParserConfigurationException;
@@ -24,7 +24,7 @@ public class IndexAction {
     public MetaVersionSet versions(String gid, String aid) {
         // do we have the meta locally/
         IndexBuilder ib=new IndexBuilder(cg);
-        Meta m=ib.meta(gid,aid);
+        MavenMetaData m=ib.meta(gid,aid);
         if(m==null) return new MetaVersionSet(Set.of());
         return m.versions();
 

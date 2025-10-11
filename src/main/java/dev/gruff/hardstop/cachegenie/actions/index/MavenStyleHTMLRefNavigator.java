@@ -1,7 +1,7 @@
 package dev.gruff.hardstop.cachegenie.actions.index;
 
-import dev.gruff.hardstop.cachegenie.Meta;
-import dev.gruff.hardstop.cachegenie.MetaBuilder;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
+import dev.gruff.hardstop.cachegenie.MavenMetaDataFactory;
 import dev.gruff.hardstop.treestreamer.ContentType;
 import dev.gruff.hardstop.treestreamer.LinkReader;
 import dev.gruff.hardstop.treestreamer.URIHelper;
@@ -22,9 +22,9 @@ import java.util.*;
 
 public final class MavenStyleHTMLRefNavigator implements LinkReader {
 
-    private final MetaBuilder mb;
+    private final MavenMetaDataFactory mb;
 
-    public MavenStyleHTMLRefNavigator(MetaBuilder mb) {
+    public MavenStyleHTMLRefNavigator(MavenMetaDataFactory mb) {
         this.mb=mb;
     }
 
@@ -68,7 +68,7 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
 
         Link m=contents.get("maven-metadata.xml");
         if(m!=null) {
-           Meta meta= toMeta(m,contents);
+           MavenMetaData meta= toMeta(m,contents);
            if(meta!=null) return meta;
         }
 
@@ -79,9 +79,14 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
     }
 
 
-    private Meta toMeta(Link m, Map<String, LinkImpl> contents) {
-       Meta meta= mb.build(m.path());
-       if(meta==null) return null;
+    private MavenMetaData toMeta(Link m, Map<String, LinkImpl> contents) {
+        MavenMetaData meta= null;
+        try {
+            meta = mb.create(m.path());
+        } catch (IOException e) {
+           return null;
+        }
+        if(meta==null) return null;
        for(String key:contents.keySet()) {
             LinkImpl li=contents.get(key);
             if(li.directory) {

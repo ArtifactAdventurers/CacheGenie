@@ -1,7 +1,7 @@
 package dev.gruff.hardstop.cachegenie.cli;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.cachegenie.MetaVersionSet;
 
 import dev.gruff.hardstop.cachegenie.actions.CompareAction;
@@ -50,8 +50,8 @@ public class CompareCmd implements Runnable {
         // unles its the first one in which case we'll bail.
 
         if(versionTargets.size()==1) {
-            Meta.Version mv=versions.version(versionTargets.get(0));
-            Meta.Version prev=versions.previous(mv.value());
+            MavenMetaData.Version mv=versions.version(versionTargets.get(0));
+            MavenMetaData.Version prev=versions.previous(mv.value());
             if(prev!=null) versionTargets.addFirst(mv.value());
             else {
                 System.out.println("no prior version for"+mv.value());
@@ -66,7 +66,7 @@ public class CompareCmd implements Runnable {
 
         CompareAction ca=new CompareAction(cg);
 
-        final Meta.Version[] last = {null};
+        final MavenMetaData.Version[] last = {null};
         versions.stream().forEach( mv -> {
             if(last[0] !=null) {
                 ca.compareVersions(gid,aid,last[0],mv);

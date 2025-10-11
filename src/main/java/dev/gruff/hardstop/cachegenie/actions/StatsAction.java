@@ -3,7 +3,7 @@ package dev.gruff.hardstop.cachegenie.actions;
 import dev.gruff.hardstop.api.HSClass;
 import dev.gruff.hardstop.api.SemanticVersion;
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.treestreamer.streamers.FileSystemTreeStreamer;
 
 import java.io.File;
@@ -55,7 +55,7 @@ public class StatsAction {
             .stream()
             .dropWhile(StatsAction::isFile)
             .filter(file -> { return file.getName().endsWith(".properties"); })
-                .map(Meta::load)
+                .map(MavenMetaData::load)
             .dropWhile(Objects::isNull)
             .forEach(m -> {
                 metas++;

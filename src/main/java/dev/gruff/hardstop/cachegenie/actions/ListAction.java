@@ -2,7 +2,7 @@ package dev.gruff.hardstop.cachegenie.actions;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexStats;
-import dev.gruff.hardstop.cachegenie.Meta;
+import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.treestreamer.streamers.FileSystemTreeStreamer;
 
 import java.io.File;
@@ -28,12 +28,12 @@ public class ListAction {
                 .map(f -> toFile(f))
                 .dropWhile(Objects::isNull)
                 .filter(f -> { return f.getName().endsWith(".properties");})
-                .map(Meta::load)
+                .map(MavenMetaData::load)
                 .forEach(f -> { anzFile(cg.repoRoot(),f,is);});
     }
 
 
-    private  void anzFile(File repo, Meta m, IndexStats is) {
+    private  void anzFile(File repo, MavenMetaData m, IndexStats is) {
 
         String gpath=m.gid.replace(".","/");
         File gN=new File(repo,gpath);
