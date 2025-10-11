@@ -1,9 +1,7 @@
 package dev.gruff.hardstop.resolver;
 
-import org.apache.logging.log4j.util.Strings;
-
 import java.util.*;
-import java.util.function.Function;
+
 
 public class DependencySet {
 
@@ -41,7 +39,7 @@ public class DependencySet {
 
         public String toString() {
             String main=gid+":"+aid+":"+ver;
-            if(Strings.isNotEmpty(type)) main=main+":"+type;
+            if(type!=null && !type.trim().isEmpty()) main=main+":"+type;
             return main;
         }
     }
