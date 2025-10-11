@@ -1,8 +1,8 @@
 package dev.gruff.hardstop.cachegenie;
-import org.apache.logging.log4j.util.Strings;
 
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public final class MetaVersionSet {
@@ -70,7 +70,11 @@ public final class MetaVersionSet {
     }
 
     public String toString() {
-        return Strings.join(sequenced, ',');
+
+        return sequenced.stream()
+                .map(Entry::toString)
+                .collect(Collectors.joining(", "));
+
     }
     public MavenMetaData.Version version(String s) {
         return byNames.get(s);
