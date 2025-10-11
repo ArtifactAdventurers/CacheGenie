@@ -1,8 +1,7 @@
 package dev.gruff.hardstop.treestreamer;
 
-import dev.gruff.hardstop.treestreamer.navigators.Link;
-
 import java.net.URI;
+import java.util.Objects;
 
 /**
  * Utility methods for working with java.net.URI instances inside the tree streamer.
@@ -38,40 +37,14 @@ public class URIHelper {
      * @return a new combined URI, or null if the URI could not be created
      */
     public static URI subDirURI(URI u, String childPath) {
-
-        StringBuilder sb=new StringBuilder();
-        String scheme=u.getScheme();
-        if(scheme!=null) {
-            sb.append(scheme);
-            sb.append("://");
+        try {
+            Objects.requireNonNull(u, "base URI must not be null");
+            if (childPath == null || childPath.isBlank()) return null;
+            // Use built-in resolution and normalize the result to remove any ./ or ../
+            return u.resolve(childPath).normalize();
+        } catch (Exception e) {
+            return null;
         }
-        String host=u.getHost();
-        if(host!=null) {
-            sb.append(host);
-           int port=u.getPort();
-           if(port>=0) {
-               sb.append(":"+port);
-           }
-           String path=u.getPath();
-           if(path==null) {
-               path=childPath;
-           } else {
-               path = path + "/" + childPath;
-           }
-           path=path.replace("//","/");
-            sb.append(path);
-
-           String query=u.getQuery();
-           if(query!=null) {
-               sb.append("?");
-               sb.append(query);
-           }
-           }
-       try {
-         return   URI.create(sb.toString());
-       } catch(Exception e) {
-           return null;
-       }
     }
 
     /**
@@ -81,31 +54,37 @@ public class URIHelper {
      * @return the final segment of the URI path, or null if the path is null or blank
      */
     public static String file(URI u) {
-        String name=u.getPath();
-        if(name==null ||name.trim().equals("")) return null;
-        String[] bits=name.split("/");
-        return bits[bits.length-1];
+        if (u == null) return null;
+        String name = u.getPath();
+        if (name == null || name.isBlank()) return null;
+        int idx = name.lastIndexOf('/');
+        return idx >= 0 ? name.substring(idx + 1) : name;
     }
 
     /**
      * Computes the path of a child URI relative to a base URI.
      *
-     * <p>The calculation uses the ASCII string representation of the URIs. It assumes that
-     * {@code path} begins with {@code base}. If this precondition is not met, a
-     * {@link StringIndexOutOfBoundsException} may be thrown by {@link String#substring(int)}.
-     * A trailing slash in the result is removed.</p>
+     * <p>Tries {@link URI#relativize(URI)} first. If that fails (returns the same path),
+     * falls back to a safe substring approach. A trailing slash in the result is removed.</p>
      *
      * @param base the base (parent) URI
      * @param path the child URI
      * @return the substring of {@code path} following {@code base}, without a trailing slash
      */
     public static String relative(URI base, URI path) {
-        String s=base.toASCIIString();
-        String p=path.toASCIIString();
-        String sub=p.substring(s.length());
-        if(sub.endsWith("/")) sub=sub.substring(0,sub.length()-1);
-
-        return sub;
+        if (base == null || path == null) return null;
+        String rel = base.relativize(path).getPath();
+        if (rel == null || rel.isEmpty() || rel.equals(path.getPath())) {
+            String s = base.toASCIIString();
+            String p = path.toASCIIString();
+            if (p.startsWith(s)) {
+                rel = p.substring(s.length());
+            } else {
+                rel = p; // best-effort fallback
+            }
+        }
+        if (rel.endsWith("/")) rel = rel.substring(0, rel.length() - 1);
+        return rel;
     }
 
     /**
@@ -119,12 +98,11 @@ public class URIHelper {
      * @param path the potential child URI
      * @return true if {@code path} starts with {@code base} and is longer; otherwise false
      */
-    public static boolean isChild(URI base,URI path) {
-        String s=base.toASCIIString().trim().toLowerCase();
-        String p=path.toASCIIString().trim().toLowerCase();
-        if(p.length()<=s.length()) return false; //child is same size or less
-        return p.startsWith(s); // child is  related to parent as it startw with same values.
-
-
+    public static boolean isChild(URI base, URI path) {
+        if (base == null || path == null) return false;
+        String s = base.toASCIIString().trim().toLowerCase();
+        String p = path.toASCIIString().trim().toLowerCase();
+        if (p.length() <= s.length()) return false; // child is same size or less
+        return p.startsWith(s); // child is related to parent as it starts with same values.
     }
 }
