@@ -54,7 +54,7 @@ public abstract class FunctionTypeReference<F, T> {
             System.out.println(z);
             System.out.println(z.type());
             System.out.println(z.isInnerClass());
-            z.methods().forEach(m -> {
+            z.methods().stream().forEach(m -> {
                 System.out.println("m "+m.name());
                 System.out.println("m "+m.descriptor());
             });
@@ -65,7 +65,7 @@ public abstract class FunctionTypeReference<F, T> {
             System.out.println("c n "+z.className());
             System.out.println("c t "+z.type());
             System.out.println("c i "+z.isInnerClass());
-            z.methods().forEach(m -> {
+            z.methods().stream().forEach(m -> {
 
                 System.out.println("m r "+m.reference());
                 System.out.println("m a "+ Utils.methodAccessFlags(m.accessFlags()));
