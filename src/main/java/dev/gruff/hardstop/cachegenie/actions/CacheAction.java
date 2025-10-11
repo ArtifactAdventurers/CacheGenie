@@ -14,7 +14,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 public class CacheAction {
-    private CacheGenie cg;
+    private final CacheGenie cg;
     public CacheAction(CacheGenie cg) {
         this.cg=cg;
     }

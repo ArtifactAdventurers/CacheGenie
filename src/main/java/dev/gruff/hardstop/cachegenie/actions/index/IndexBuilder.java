@@ -13,7 +13,6 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.time.Duration;
 import java.util.*;
@@ -36,7 +35,7 @@ public class IndexBuilder {
 
                 .onMatch(ContentType.HTML)// when HTML
                   .and(this::checkPath)
-                  .useReader(new MavenStyleHTMLRefNavigator(mb)) // parse with maven aware parser
+                  .useReader(new MavenStyleHTMLRefNavigator(mb)) // parse with maven-aware parser
 
               .build();
 
@@ -44,11 +43,8 @@ public class IndexBuilder {
     }
 
     private boolean checkPath(Link l) {
-       // System.out.println(l);
-       // System.out.println(l.path());
-       // System.out.println(l.path().toASCIIString());
-       // System.out.println(l.path().toASCIIString().endsWith("/"));
-        return l.path().toASCIIString().endsWith("/");// and it loks like a directory
+
+        return l.path().toASCIIString().endsWith("/");// and it looks like a directory
     }
 
 
