@@ -16,10 +16,10 @@ import java.util.Set;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
 
-public class CodeSet {
+public final class CodeSet {
 
-    private Map<File,HSClass> sourceMap=new HashMap<>();
-    private Map<String,HSClass> nameMap=new HashMap<>();
+    private final Map<File,HSClass> sourceMap=new HashMap<>();
+    private final Map<String,HSClass> nameMap=new HashMap<>();
 
     public Set<HSClass> unknownClasses(CodeSet c1) {
 

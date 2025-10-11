@@ -100,7 +100,10 @@ public final class URITreeSteamVisitorBuilder {
            irs.stream().forEach(o -> {
 
                Consumer s= findConsumer(o);
-               if(s!=null) s.accept(o);
+               if(s!=null) {
+
+                   s.accept(o);
+               }
                else {
                    System.out.println("no consumer for "+o);
                }

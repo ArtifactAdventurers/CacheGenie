@@ -21,23 +21,24 @@ import static dev.gruff.hardstop.treestreamer.navigators.NavigatorPolicyBuilder.
 
 public class IndexBuilder {
 
-  CacheGenie genie;
-   final     NavigatorPolicy policy;
-   final MavenMetaDataFactory mb;
-    public IndexBuilder(CacheGenie cg) {
-        genie=cg;
-        mb= MavenMetaDataFactory.newInstance();
+    CacheGenie genie;
+    final NavigatorPolicy policy;
+    final MavenMetaDataFactory mb;
 
-     policy= builder()
+    public IndexBuilder(CacheGenie cg) {
+        genie = cg;
+        mb = MavenMetaDataFactory.newInstance();
+
+        policy = builder()
 
                 .rateLimit(100, Duration.ofMinutes(1))  // play nice
                 .defaultReader(new HTMLRefNavigator()) // turn html docs into linksets
 
                 .onMatch(ContentType.HTML)// when HTML
-                  .and(IndexBuilder::checkPath)
-                  .useReader(new MavenStyleHTMLRefNavigator(mb)) // parse with maven-aware parser
+                .and(IndexBuilder::checkPath)
+                .useReader(new MavenStyleHTMLRefNavigator(mb)) // parse with maven-aware parser
 
-              .build();
+                .build();
 
 
     }
@@ -52,14 +53,21 @@ public class IndexBuilder {
         return !u.path().getPath().contains(".");
     }
 
-    public  void index(List<String> args) {
+    /**
+     * List entries of full or partial GAVs
+     *
+     * so   XXX   XXX:XXX  XXX:XXX:XXX
+     *
+     * @param args
+     */
+    public void index(List<String> args) {
         // traverse website
 
-        if(args.isEmpty()) {
+        if (args.isEmpty()) {
             args.add("");
         }
 
-        if(args.get(0).equalsIgnoreCase("?")) {
+        if (args.get(0).equalsIgnoreCase("?")) {
 
             try {
                 randomWalk();
@@ -69,6 +77,8 @@ public class IndexBuilder {
         } else {
             for (String arg : args) {
                 arg = arg.trim();
+                arg=arg.replace(":","/");
+                arg=arg.replace(".","/");
                 index(arg);
             }
         }
@@ -78,19 +88,18 @@ public class IndexBuilder {
     private void randomWalk() throws IOException {
 
         // randomise...
-        File list=new File(genie.work(),"index_build");
+        File list = new File(genie.work(), "index_build");
         List<String> lines;
-        if(list.exists()) {
-             lines=Files.readAllLines(list.toPath());
+        if (list.exists()) {
+            lines = Files.readAllLines(list.toPath());
+        } else {
+            lines = new LinkedList<>();
         }
-        else {
-            lines=new LinkedList<>();
-        }
-        Set<String> toDo=new HashSet<>();
+        Set<String> toDo = new HashSet<>();
         toDo.addAll(lines);
 
         // todo shows what's leftto do.
-        if(toDo.isEmpty()) {
+        if (toDo.isEmpty()) {
 
 
             NavigatorPolicy shortPolicy = builder()
@@ -104,39 +113,39 @@ public class IndexBuilder {
                     .select()
                     .on(Link.class)
                     .consume(l -> {
-                        String f = URIHelper.relative(genie.base(),l.path());
+                        String f = URIHelper.relative(genie.base(), l.path());
                         String[] bits = f.split("/");
                         if (bits.length > 1) {
                             toDo.add(f);
-                            System.out.println("group "+f);
+                            System.out.println("group " + f);
                         }
                     })
                     .visit();
 
         }
 
-        System.out.println("=== IB TODO "+toDo.size());
-       Iterator<String> i=toDo.iterator();
-        while(i.hasNext()) {
-            String key=i.next();
-            System.out.println("=== IB ==== > "+key+" ("+toDo.size());
+        System.out.println("=== IB TODO " + toDo.size());
+        Iterator<String> i = toDo.iterator();
+        while (i.hasNext()) {
+            String key = i.next();
+            System.out.println("=== IB ==== > " + key + " (" + toDo.size());
             index(key);
             i.remove();
-            writeToDo(list,toDo);
+            writeToDo(list, toDo);
 
         }
 
     }
 
-    private void writeToDo(File list, Set<String> toDo)  {
+    private void writeToDo(File list, Set<String> toDo) {
 
-        try(FileWriter fw=new FileWriter(list)) {
+        try (FileWriter fw = new FileWriter(list)) {
             PrintWriter pw = new PrintWriter(fw);
             for (String s : toDo) {
                 pw.println(s);
                 pw.flush();
             }
-        } catch(IOException ioe) {
+        } catch (IOException ioe) {
             ioe.printStackTrace();
         }
 
@@ -144,71 +153,75 @@ public class IndexBuilder {
 
     private void index(String arg) {
 
-        if(arg.startsWith("/")) arg=arg.substring(1);
-        String url="repo1.maven.org/maven2/"+arg;
-        url=url.replace("//","/");
-        URI root= URI.create("https://"+url);
+        System.out.println("indexing "+arg);
+        if (arg.startsWith("/")) arg = arg.substring(1);
+        String url = "repo1.maven.org/maven2/" + arg+"/";
+        url = url.replace("//", "/");
+        URI root = URI.create("https://" + url);
+        System.out.println("root "+root);
 
         URITreeSteamVisitorBuilder.newInstance(root)
                 .policy(policy)
                 .select()
-                    .on(MavenMetaData.class)
-                        .consume(m -> handleMeta(m))
-                    .on(LinkSetImpl.class)
-                        .consume(s -> s.stream().forEach(k -> System.out.println("ls:"+k.path())))
+                .on(MavenMetaData.class)
+                  .consume(m -> handleMeta(m))
+                .on(LinkSetImpl.class)
+                  .consume(s -> s.stream().forEach(k -> System.out.println("ls:" + k.path())))
                 .on(Link.class)
-                .consume(l -> System.out.println("file: "+l.path().toASCIIString()))
-                    .otherwise()
-                        .consume(o -> {System.out.println("other:"+o);})
+                  .consume(l -> System.out.println("file link: " + l.path().toASCIIString()))
+                .otherwise()
+                  .consume(o -> {
+                      System.out.println("other:" + o);
+                  })
                 .visit();
 
     }
 
     private void handleMeta(MavenMetaData m) {
 
-            if(m.uri==null) {
-                System.out.println("meta has no uri");
-                return;
+        if (m.uri == null) {
+            System.out.println("meta has no uri");
+            return;
+        }
+        System.out.println("meta link: "+m.uri);
+        File local = toLocal(m.uri);
+        if (local.exists()) {
+            System.out.print(m.gid.charAt(0));
+        } else {
+            local.getParentFile().mkdirs();
+            try {
+                m.save(local);
+            } catch (IOException e) {
+                System.out.println(e);
             }
-           // System.out.println("meta "+m.uri);
-           File local=toLocal(m.uri);
-            if(local.exists()) {
-                System.out.print(m.gid.charAt(0));
-            } else {
-                local.getParentFile().mkdirs();
-                try {
-                    m.save(local);
-                } catch (IOException e) {
-                   System.out.println(e);
-                }
-            }
+        }
     }
 
     private File toLocal(URI u) {
-        URI rel= genie.base().relativize(u);
-        String relPath=rel.getPath();
-        LinkedList<String> l=new LinkedList<>();
+        URI rel = genie.base().relativize(u);
+        String relPath = rel.getPath();
+        LinkedList<String> l = new LinkedList<>();
         l.addAll(List.of(relPath.split("/")));
         l.removeLast(); // drop name
-        String aid=l.removeLast();
-        String gid=String.join(".",l);
-        return toFile(gid,aid);
+        String aid = l.removeLast();
+        String gid = String.join(".", l);
+        return toFile(gid, aid);
 
     }
 
     private File toFile(String gid, String aid) {
-        String cacheFile=gid+":"+aid+".properties";
-        File c=new File(genie.cacheGenieRoot(),cacheFile);
+        String cacheFile = gid + ":" + aid + ".properties";
+        File c = new File(genie.cacheGenieRoot(), cacheFile);
         return c;
     }
 
 
     public MavenMetaData meta(String gid, String aid) {
 
-        File f=toFile(gid,aid);
-        if(f!=null && f.isFile() && f.exists()) return MavenMetaData.load(f);
+        File f = toFile(gid, aid);
+        if (f != null && f.isFile() && f.exists()) return MavenMetaData.load(f);
 
-       URI file= URIHelper.subDirURI(genie.base(),gid.replace(".","/")+"/"+aid);
+        URI file = URIHelper.subDirURI(genie.base(), gid.replace(".", "/") + "/" + aid);
 
         NavigatorPolicy shortPolicy = builder()
                 .rateLimit(100, Duration.ofMinutes(1))  // play nice
@@ -216,19 +229,19 @@ public class IndexBuilder {
                 .maxDepth(1)
                 .build();
 
-        final List<MavenMetaData> metas=new LinkedList<>();
+        final List<MavenMetaData> metas = new LinkedList<>();
         URITreeSteamVisitorBuilder.newInstance(file)
                 .policy(shortPolicy)
                 .select()
                 .on(MavenMetaData.class)
                 .consume(m -> {
-                    System.out.println("read "+m);
+                    System.out.println("read " + m);
                     handleMeta(m); // save it
                     metas.add(m);
                 })
                 .visit();
 
-        if(metas.isEmpty()) return null;
+        if (metas.isEmpty()) return null;
         return metas.get(0);
     }
 }
