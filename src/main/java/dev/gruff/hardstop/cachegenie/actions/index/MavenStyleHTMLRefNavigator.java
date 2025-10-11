@@ -15,6 +15,7 @@ import org.jsoup.nodes.Node;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.*;
@@ -31,7 +32,7 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
     public Object parse(Link uri, InputStream in) {
         Document doc= null;
         try {
-            doc = Jsoup.parse(in,"UTF8",uri.path().toASCIIString());
+            doc = Jsoup.parse(in, StandardCharsets.UTF_8.name(), uri.path().toASCIIString());
         } catch (IOException e) {
             return new LinkSetImpl();
 
@@ -42,14 +43,12 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
         Map<String,LinkImpl> contents=new TreeMap<>();
          doc.select("a[href]")
                 .stream()
-                .map(e -> toLink(uri,e))
-                 .dropWhile(Objects::isNull)
-                .forEach(l ->{
-                    if(l!=null) {
-                        lsi.addLink(l);
-                        String name = l.name();
-                        contents.put(name, l);
-                    }
+                .map(e -> toLink(uri, e))
+                .filter(Objects::nonNull)
+                .forEach(l -> {
+                    lsi.addLink(l);
+                    String name = l.name();
+                    contents.put(name, l);
                 });
 
 
