@@ -30,7 +30,7 @@ public class StatsAction {
     private long clazzes=0;
    private int versions=0;
    private int metas=0;
-    private Map<String,Counter> semvars=new HashMap<>();
+    private final Map<String,Counter> semvars=new HashMap<>();
     public StatsAction(CacheGenie cg) {
         this.cg=cg;
     }
@@ -48,19 +48,18 @@ public class StatsAction {
         System.out.println("JARS="+jars);
         System.out.println("CLAZ="+clazzes);
 
-    FileSystemTreeStreamer.builder(cg.cacheGenieRoot())
-
-            .suppressDirectories(true)
-            .build()
-            .stream()
-            .dropWhile(StatsAction::isFile)
-            .filter(file -> { return file.getName().endsWith(".properties"); })
+        FileSystemTreeStreamer.builder(cg.cacheGenieRoot())
+                .suppressDirectories(true)
+                .build()
+                .stream()
+                .map(o -> (File) o)
+                .filter(file -> file.getName().endsWith(".properties"))
                 .map(MavenMetaData::load)
-            .dropWhile(Objects::isNull)
-            .forEach(m -> {
-                metas++;
-               versions+=m.versions.size();
-            });
+                .filter(Objects::nonNull)
+                .forEach(m -> {
+                    metas++;
+                    versions+=m.versions.size();
+                });
 
         System.out.println("META="+metas);
         System.out.println("VERS="+versions);
@@ -105,6 +104,7 @@ public class StatsAction {
     }
 
     private void updateCompilerType(SemanticVersion semanticVersion) {
+        if (semanticVersion == null) return;
         Counter c=semvars.get(semanticVersion.toString());
         if(c==null) {
             c=new Counter();
