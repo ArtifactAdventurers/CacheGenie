@@ -8,7 +8,7 @@ import java.net.URI;
 
 
 
-@CommandLine.Command(name = "cachegenie", mixinStandardHelpOptions = true, subcommands = {IndexCmd.class,DBCmd.class, CompareCmd.class, CacheCmd.class,GraphCmd.class})
+@CommandLine.Command(name = "cachegenie", mixinStandardHelpOptions = true, subcommands = {IndexCmd.class,DBCmd.class, CompareCmd.class, CacheCmd.class,GraphCmd.class, MetaCmd.class})
 
 public class RootCmd  {
 
@@ -19,6 +19,25 @@ public class RootCmd  {
 
     @CommandLine.Option(names = {"-r", "--repo"}, description = "Default remote repository")
     public URI repo=CacheGenie.defaultRemoteRepo();
+
+    @CommandLine.Option(names = {"-l", "--log"}, description = "Log level (trace, debug, info, warn, error)", defaultValue = "info")
+    public void setLogLevel(String level) {
+        System.setProperty("LOG_LEVEL", level);
+        org.slf4j.ILoggerFactory factory = org.slf4j.LoggerFactory.getILoggerFactory();
+        if (factory instanceof ch.qos.logback.classic.LoggerContext loggerContext) {
+            ch.qos.logback.classic.joran.JoranConfigurator configurator = new ch.qos.logback.classic.joran.JoranConfigurator();
+            configurator.setContext(loggerContext);
+            loggerContext.reset();
+            try {
+                java.net.URL url = getClass().getResource("/logback.xml");
+                if (url != null) {
+                    configurator.doConfigure(url);
+                }
+            } catch (ch.qos.logback.core.joran.spi.JoranException e) {
+                // ignore
+            }
+        }
+    }
 
 
 

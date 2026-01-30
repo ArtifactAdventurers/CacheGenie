@@ -2,10 +2,13 @@ package dev.gruff.hardstop.cachegenie.cli;
 
 
 import dev.gruff.hardstop.cachegenie.actions.CacheAction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 @CommandLine.Command(name = "cache", description = "cache artifacts")
 public class CacheCmd implements Runnable {
+    private static final Logger log = LoggerFactory.getLogger(CacheCmd.class);
 
     @CommandLine.ParentCommand
     RootCmd parent;
@@ -17,9 +20,9 @@ public class CacheCmd implements Runnable {
         CacheAction ca=new CacheAction(parent.genie());
         ca.cache(depops.gid+":"+depops.aid+":"+depops.versionTargets.getFirst());
 
-        System.out.println("Cache!");
-        System.out.println("root "+parent.repo);
-        System.out.println("cache "+parent.cache);
+        log.info("Cache!");
+        log.info("root {}", parent.repo);
+        log.info("cache {}", parent.cache);
         System.exit(0);
     }
 }

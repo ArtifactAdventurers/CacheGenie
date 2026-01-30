@@ -31,6 +31,11 @@
 
 
   <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.13</version>
+    </dependency>
 
     <dependency>
       <groupId>info.picocli</groupId>
@@ -119,6 +124,12 @@
     <version>${maven.version}</version>
   </dependency>
 
+  <dependency>
+    <groupId>ch.qos.logback</groupId>
+    <artifactId>logback-classic</artifactId>
+    <version>1.5.6</version>
+  </dependency>
+
 </dependencies>
 
   <build>
@@ -139,6 +150,7 @@
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>dev.gruff.hardstop.cachegenie.cli.Main</mainClass>
                 </transformer>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
               </transformers>
             </configuration>
           </execution>

@@ -16,9 +16,12 @@ import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.impl.DefaultServiceLocator;
 import org.eclipse.aether.repository.LocalRepository;
 import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.resolution.ArtifactRequest;
+import org.eclipse.aether.resolution.ArtifactResult;
 import org.eclipse.aether.resolution.DependencyRequest;
 import org.eclipse.aether.resolution.DependencyResolutionException;
 import org.eclipse.aether.resolution.DependencyResult;
+import org.eclipse.aether.resolution.ArtifactResolutionException;
 import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
 import org.eclipse.aether.spi.connector.transport.TransporterFactory;
 import org.eclipse.aether.transport.file.FileTransporterFactory;
@@ -126,6 +129,23 @@ public class Resolver {
                 results.addAll(dn);
         }
         return results;
+    }
+
+    public void resolvePOM(String d) {
+        log.info("resolving POM for {}", d);
+        session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
+
+        Artifact artifact = new DefaultArtifact(d + ":pom");
+        ArtifactRequest artifactRequest = new ArtifactRequest();
+        artifactRequest.setArtifact(artifact);
+        artifactRequest.setRepositories(rrlist);
+
+        try {
+            ArtifactResult artifactResult = system.resolveArtifact(session, artifactRequest);
+            log.info("resolved POM for {}", artifactResult.getArtifact());
+        } catch (ArtifactResolutionException e) {
+            log.info(e.getMessage());
+        }
     }
 
     private  List<DependencyNode> resolve0(String d)  {

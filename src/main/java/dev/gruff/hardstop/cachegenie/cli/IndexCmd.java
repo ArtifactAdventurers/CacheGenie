@@ -2,6 +2,8 @@ package dev.gruff.hardstop.cachegenie.cli;
 
 import dev.gruff.hardstop.cachegenie.actions.CacheAction;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 import javax.xml.parsers.ParserConfigurationException;
@@ -10,6 +12,7 @@ import java.util.List;
 
 @CommandLine.Command(name = "index", description = "Index remote cache")
 public class IndexCmd implements Runnable {
+    private static final Logger log = LoggerFactory.getLogger(IndexCmd.class);
 
     @CommandLine.ParentCommand
     RootCmd parent;
@@ -20,10 +23,10 @@ public class IndexCmd implements Runnable {
 
     @Override
     public void run() {
-        System.out.println("CacheGenie Repo Index");
-        System.out.println("root "+parent.repo);
-        System.out.println("cache "+parent.cache);
-        System.out.println("List "+gavs);
+        log.info("CacheGenie Repo Index");
+        log.info("root {}", parent.repo);
+        log.info("cache {}", parent.cache);
+        log.info("List {}", gavs);
         IndexAction action=new IndexAction(parent.genie());
         try {
             action.index(gavs);

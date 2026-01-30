@@ -8,11 +8,14 @@ import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
 import dev.gruff.hardstop.cachegenie.graph.DotViz;
 import dev.gruff.hardstop.resolver.DependencySet;
 import dev.gruff.hardstop.resolver.Resolver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 
 @CommandLine.Command(name = "graph", description = "Produce graph of artifact dependencies ", subcommands = {GraphCmd.GraphCacheCmd.class, GraphCmd.GraphArtifact.class})
 public class GraphCmd  {
+    private static final Logger log = LoggerFactory.getLogger(GraphCmd.class);
 
     @CommandLine.ParentCommand
     RootCmd parent;
@@ -25,12 +28,12 @@ public class GraphCmd  {
 
         @Override
         public void run() {
-            System.out.println("Graph");
+            log.info("Graph");
 
             CacheGenie cg = parent.parent.genie();
             CacheAction ca=new CacheAction(cg);
             ca.stream().forEach(f -> {
-                System.out.println(f.artifact().value());
+                log.info(f.artifact().value());
             });
 
         }
@@ -53,7 +56,7 @@ public class GraphCmd  {
 
         @Override
         public void run() {
-            System.out.println("Graph");
+            log.info("Graph");
 
             CacheGenie cg = parent.parent.genie();
             IndexAction ia = new IndexAction(cg);
@@ -64,7 +67,7 @@ public class GraphCmd  {
             boolean failed = false;
             for (String vr : depops.versionTargets) {
                 if (!versions.hasVersion(vr)) {
-                    System.out.println("can't locate version " + vr);
+                    log.info("can't locate version {}", vr);
                     failed = true;
                 }
             }
@@ -78,14 +81,14 @@ public class GraphCmd  {
                 MavenMetaData.Version prev = versions.previous(mv.value());
                 if (prev != null) depops.versionTargets.addFirst(mv.value());
                 else {
-                    System.out.println("no prior version for" + mv.value());
+                    log.info("no prior version for {}", mv.value());
                 }
             }
 
-            System.out.println("root " + parent.parent.repo);
-            System.out.println("cache " + parent.parent.cache);
-            System.out.println("gid " + depops.gid);
-            System.out.println("aid " + depops.aid);
+            log.info("root {}", parent.parent.repo);
+            log.info("cache {}", parent.parent.cache);
+            log.info("gid {}", depops.gid);
+            log.info("aid {}", depops.aid);
 
             Resolver r = Resolver.Builder(cg).build();
 

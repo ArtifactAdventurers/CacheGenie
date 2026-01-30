@@ -6,6 +6,8 @@ import dev.gruff.hardstop.cachegenie.MetaVersionSet;
 
 import dev.gruff.hardstop.cachegenie.actions.CompareAction;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 
@@ -14,6 +16,7 @@ import java.util.List;
 
 @CommandLine.Command(name = "compare", description = "Analyse APi differences")
 public class CompareCmd implements Runnable {
+    private static final Logger log = LoggerFactory.getLogger(CompareCmd.class);
 
     @CommandLine.ParentCommand
     RootCmd parent;
@@ -29,7 +32,7 @@ public class CompareCmd implements Runnable {
 
     @Override
     public void run() {
-        System.out.println("Compare");
+        log.info("Compare");
 
         CacheGenie cg = parent.genie();
         IndexAction ia = new IndexAction(cg);
@@ -40,7 +43,7 @@ public class CompareCmd implements Runnable {
         boolean failed = false;
         for (String vr : versionTargets) {
             if (!versions.hasVersion(vr)) {
-                System.out.println("can't locate version " + vr);
+                log.info("can't locate version {}", vr);
                 failed = true;
             }
         }
@@ -54,15 +57,15 @@ public class CompareCmd implements Runnable {
             MavenMetaData.Version prev=versions.previous(mv.value());
             if(prev!=null) versionTargets.addFirst(mv.value());
             else {
-                System.out.println("no prior version for"+mv.value());
+                log.info("no prior version for {}", mv.value());
             }
         }
 
-        System.out.println("root "+parent.repo);
-        System.out.println("cache "+parent.cache);
-        System.out.println("gid "+gid);
-        System.out.println("aid "+aid);
-        System.out.println("comparing versions "+versions);
+        log.info("root {}", parent.repo);
+        log.info("cache {}", parent.cache);
+        log.info("gid {}", gid);
+        log.info("aid {}", aid);
+        log.info("comparing versions {}", versions);
 
         CompareAction ca=new CompareAction(cg);
 
