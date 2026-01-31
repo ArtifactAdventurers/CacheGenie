@@ -70,8 +70,10 @@ db
 Scans cached metadata and downloads any missing POM files for the versions listed. It does not re-download existing POMs or JARs.
 
 ```bash
-meta
+meta [-u] [-gav=<GAV-Selector>...]
 ```
+-   `-gav, --group-artifact-version=<GAV-Selector>`: One or more `group:artifact:version` strings to filter the meta-scan.
+-   `-u, --update`: Force a retry for downloading POM files that were previously marked as missing.
 
 #### `cache`
 Downloads and caches specific artifacts into the local Maven cache.

@@ -131,11 +131,17 @@ public class Resolver {
         return results;
     }
 
-    public void resolvePOM(String d) {
+    public boolean resolvePOM(String d) {
         log.info("resolving POM for {}", d);
         session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
 
-        Artifact artifact = new DefaultArtifact(d + ":pom");
+        String[] parts = d.split(":");
+        if (parts.length < 3) {
+            log.error("Invalid GAV for POM resolution: {}", d);
+            return false;
+        }
+
+        Artifact artifact = new DefaultArtifact(parts[0], parts[1], "pom", parts[2]);
         ArtifactRequest artifactRequest = new ArtifactRequest();
         artifactRequest.setArtifact(artifact);
         artifactRequest.setRepositories(rrlist);
@@ -143,8 +149,10 @@ public class Resolver {
         try {
             ArtifactResult artifactResult = system.resolveArtifact(session, artifactRequest);
             log.info("resolved POM for {}", artifactResult.getArtifact());
+            return true;
         } catch (ArtifactResolutionException e) {
             log.info(e.getMessage());
+            return false;
         }
     }
 

@@ -1,5 +1,8 @@
 package dev.gruff.hardstop.cachegenie;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
@@ -9,6 +12,7 @@ import java.time.Instant;
 import java.util.*;
 
 public class MavenMetaData {
+    private static final Logger log = LoggerFactory.getLogger(MavenMetaData.class);
 
     public MetaVersionSet versions() {
 
@@ -40,6 +44,7 @@ public class MavenMetaData {
     public String gid = "";
     public String aid = "";
     public Map<String,Version> versions=new TreeMap<>();
+    public Set<String> missingPoms = new TreeSet<>();
     public String latest = "";
     public String release = "";
     private Instant updated;
@@ -65,7 +70,7 @@ public class MavenMetaData {
     public void save(File f) throws IOException {
 
         if(f==null) {
-            System.out.println("no  file");
+            log.warn("no file provided for saving meta data");
             return;
         }
 
@@ -80,6 +85,11 @@ public class MavenMetaData {
         versionNames.addAll(versions.keySet());
         String vlist=String.join(" ",versionNames);
         p.setProperty("meta.versions",vlist);
+
+        if (!missingPoms.isEmpty()) {
+            p.setProperty("meta.missing.poms", String.join(" ", missingPoms));
+        }
+
         int c=1;
         for(String v:versionNames) {
             p.setProperty("version."+c+".updated", String.valueOf(versions.get(v).updated));
@@ -87,9 +97,11 @@ public class MavenMetaData {
         }
 
         p.setProperty("meta.generated",Instant.now().toString());
-        p.store(new FileWriter(f),""+Instant.now());
+        try (FileWriter fw = new FileWriter(f)) {
+            p.store(fw, "" + Instant.now());
+        }
 
-        System.out.println("saved "+f.getAbsolutePath());
+        log.info("saved {}", f.getAbsolutePath());
     }
 
     public String toString() {
@@ -104,7 +116,7 @@ public class MavenMetaData {
         try( FileReader fr=new FileReader(f)) {
             p.load(fr);
             if(p.keySet().size()==0) {
-                System.out.println("nodata "+f.getAbsolutePath());
+                log.warn("nodata {}", f.getAbsolutePath());
                 meta.status= Status.corrupted_propoerties;
                 return meta;
             }
@@ -116,6 +128,10 @@ public class MavenMetaData {
             meta.release=p.getProperty("meta.release");
             meta.generated=toInstant(p.getProperty("meta.generated"));
             meta.updated =toInstant(p.getProperty("meta.updated"));
+            String missingPomsStr = p.getProperty("meta.missing.poms", "");
+            if (!missingPomsStr.isEmpty()) {
+                meta.missingPoms.addAll(Arrays.asList(missingPomsStr.split(" ")));
+            }
             String[] vnames=p.getProperty("meta.versions","").split(" ");
             meta.versions=new TreeMap<>();
             for(int i=0;i<vnames.length;i++) {
@@ -130,7 +146,7 @@ public class MavenMetaData {
 
             //
         } catch(IOException fne) {
-            System.out.println("corrupted "+f.getAbsolutePath());
+            log.warn("corrupted {}", f.getAbsolutePath());
             meta.status= Status.corrupted_propoerties;
         }
 
@@ -173,6 +189,18 @@ public class MavenMetaData {
             versions.put(key,v);
         }
         v.updated=updated;
+    }
+
+    public boolean isMissingPom(String version) {
+        return missingPoms.contains(version);
+    }
+
+    public void markPomAsMissing(String version) {
+        missingPoms.add(version);
+    }
+
+    public void markPomAsFound(String version) {
+        missingPoms.remove(version);
     }
 
     public static enum Status {
