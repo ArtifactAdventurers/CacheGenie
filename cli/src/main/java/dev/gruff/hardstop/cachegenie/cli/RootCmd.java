@@ -8,7 +8,7 @@ import java.net.URI;
 
 
 
-@CommandLine.Command(name = "cachegenie", mixinStandardHelpOptions = true, subcommands = {IndexCmd.class,DBCmd.class, CompareCmd.class, CacheCmd.class,GraphCmd.class, MetaCmd.class})
+@CommandLine.Command(name = "cachegenie", mixinStandardHelpOptions = true, subcommands = {IndexCmd.class,DBCmd.class, CompareCmd.class, CacheCmd.class,GraphCmd.class, MetaCmd.class, MetaCSVCmd.class})
 
 public class RootCmd  {
 
