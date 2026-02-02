@@ -27,8 +27,8 @@ import java.util.stream.Collectors;
  *   <li>Non-navigable schemes such as mailto: and javascript:</li>
  * </ul>
  *
- * <p>Relative links are resolved via {@link dev.gruff.hardstop.treestreamer.URIHelper#subDirURI(java.net.URI, String)}
- * and constrained by {@link dev.gruff.hardstop.treestreamer.URIHelper#isChild(java.net.URI, java.net.URI)}.</p>
+ * <p>Relative links are resolved via {@link URIHelper#subDirURI(URI, String)}
+ * and constrained by {@link URIHelper#isChild(URI, URI)}.</p>
  *
  * <p>This class is stateless and safe for concurrent use.</p>
  */
@@ -94,7 +94,7 @@ public final class HTMLRefNavigator implements LinkReader {
      * Immutable Link implementation used by HTMLRefNavigator to represent child URIs.
      *
      * <p>Wraps a resolved URI and provides minimal type information. Content type matching
-     * is not performed here and {@link #isType(dev.gruff.hardstop.treestreamer.ContentType)}
+     * is not performed here and {@link #isType(ContentType)}
      * returns false for all values.</p>
      */
     public static class MyLink implements Link {

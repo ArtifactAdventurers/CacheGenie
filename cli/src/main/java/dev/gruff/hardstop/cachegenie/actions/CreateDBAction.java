@@ -42,8 +42,14 @@ public final class CreateDBAction {
         System.out.println("Create CacheGenie Repo Index DB");
         File root=cg.cacheGenieRoot();
         Path path=root.toPath();
-        File db=new File(root,"index.db");
-        File vrdb=new File(root,"range.db");
+
+        File data=new File(root,"data");
+        if(!data.exists()) {
+            data.mkdirs();
+        }
+
+        File db=new File(data,"index.db");
+        File vrdb=new File(data,"range.db");
 
         try(Stream<Path> stream= Files.list(path);
             FileWriter fw=new FileWriter(db);

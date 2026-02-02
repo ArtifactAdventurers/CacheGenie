@@ -17,18 +17,18 @@ import java.util.stream.Stream;
  *
  * <p>This streamer fetches resources using Jsoup and delegates how to parse each
  * fetched resource, when to continue traversal, and how to rate-limit requests to an
- * {@link dev.gruff.hardstop.treestreamer.navigators.AbstractNavigatorPolicy}.</p>
+ * {@link AbstractNavigatorPolicy}.</p>
  *
- * <p>Traversal is depth-first. For each visited {@link dev.gruff.hardstop.treestreamer.navigators.Link}
- * the policy supplies a {@link dev.gruff.hardstop.treestreamer.LinkReader} which either returns:
+ * <p>Traversal is depth-first. For each visited {@link Link}
+ * the policy supplies a {@link LinkReader} which either returns:
  * <ul>
- *   <li>a {@link dev.gruff.hardstop.treestreamer.navigators.LinkSet} whose members are expanded recursively, or</li>
+ *   <li>a {@link LinkSet} whose members are expanded recursively, or</li>
  *   <li>an arbitrary terminal result object that is emitted into the stream</li>
  * </ul>
- * A {@code null} parser result is treated as an empty {@link dev.gruff.hardstop.treestreamer.navigators.LinkSet}.</p>
+ * A {@code null} parser result is treated as an empty {@link LinkSet}.</p>
  *
  * <p>Traversal halts beneath depths that the policy rejects via
- * {@link dev.gruff.hardstop.treestreamer.navigators.AbstractNavigatorPolicy#belowDepth(int)}.
+ * {@link AbstractNavigatorPolicy#belowDepth(int)}.
  * Errors (I/O, unsupported MIME type) and interruptions while waiting on the
  * rate limiter are swallowed for the current link and do not fail the stream.</p>
  *
@@ -36,8 +36,8 @@ import java.util.stream.Stream;
  * or extend within the same module as permitted.</p>
  *
  * <p>Thread-safety: instances of this class are thread-safe for concurrent calls to {@link #stream()},
- * provided the supplied {@link dev.gruff.hardstop.treestreamer.navigators.AbstractNavigatorPolicy} and any
- * {@link dev.gruff.hardstop.treestreamer.LinkReader} implementations are not modified after construction.</p>
+ * provided the supplied {@link AbstractNavigatorPolicy} and any
+ * {@link LinkReader} implementations are not modified after construction.</p>
  */
 public abstract sealed class URITreeStreamer  implements TreeStreamer<Object> permits URITreeSteamVisitorBuilder.InternalURITreeStreamer {
 
@@ -64,10 +64,10 @@ public abstract sealed class URITreeStreamer  implements TreeStreamer<Object> pe
      * Produces a lazy, depth-first stream of traversal outputs starting at the root URI.
      * <p>The stream may contain:</p>
      * <ul>
-     *   <li>{@link dev.gruff.hardstop.treestreamer.navigators.Link} instances representing visited nodes, and</li>
-     *   <li>terminal result objects produced by policy-provided {@link dev.gruff.hardstop.treestreamer.LinkReader}s</li>
+     *   <li>{@link Link} instances representing visited nodes, and</li>
+     *   <li>terminal result objects produced by policy-provided {@link LinkReader}s</li>
      * </ul>
-     * The exact mix depends on the configured {@link dev.gruff.hardstop.treestreamer.navigators.AbstractNavigatorPolicy}.
+     * The exact mix depends on the configured {@link AbstractNavigatorPolicy}.
      *
      * @return a sequential Stream of traversal items
      */

@@ -7,7 +7,10 @@
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
         <module name="resolver" />
-        <module name="cachegenie" />
+        <module name="cli" />
+        <module name="core" />
+        <module name="streamer" />
+        <module name="release" />
       </profile>
     </annotationProcessing>
   </component>
