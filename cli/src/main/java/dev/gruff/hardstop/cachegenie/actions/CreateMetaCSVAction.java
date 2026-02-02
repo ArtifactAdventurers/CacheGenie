@@ -29,16 +29,14 @@ public class CreateMetaCSVAction {
 
         log.info("Creating CSV file: {}", outputFile.getAbsolutePath());
         try (PrintWriter pw = new PrintWriter(new FileWriter(outputFile))) {
-            pw.println("gav,groupId,artifactId,version,published");
+            pw.println("groupId,artifactId,version,published");
 
             for (File f : files) {
                 MavenMetaData meta = MavenMetaData.load(f);
                 if (meta == null || meta.gid == null || meta.aid == null) continue;
 
                 for (MavenMetaData.Version v : meta.versions.values()) {
-                    String gav = meta.gid + ":" + meta.aid + ":" + v.value();
-                    pw.printf("%s,%s,%s,%s,%s%n",
-                            gav,
+                    pw.printf("%s,%s,%s,%s%n",
                             meta.gid,
                             meta.aid,
                             v.value(),
