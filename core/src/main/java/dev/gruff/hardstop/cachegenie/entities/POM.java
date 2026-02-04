@@ -13,11 +13,11 @@ import java.util.TreeSet;
 
 public sealed interface POM permits  POM.POMImpl {
 
-    static POM create(ArtifactRef ref, List<ArtifactRef> dependencies) {
+    static POM create(ArtifactRef ref, List<ArtifactRef> dependencies, POMStatus status, String packaging, String javaSource, String javaTarget, String javaRelease) {
         ObjectChecks.isPresent("artifactID",ref);
         ObjectChecks.isPresent("dependencies",dependencies);
 
-        return new POMImpl(ref,dependencies,POMStatus.OK);
+        return new POMImpl(ref,dependencies,status, packaging, javaSource, javaTarget, javaRelease);
     }
 
     static POM create(POMStatus pomStatus) {
@@ -25,6 +25,12 @@ public sealed interface POM permits  POM.POMImpl {
     }
 
     ArtifactRef artifact();
+    POMStatus status();
+    List<ArtifactRef> dependencies();
+    String packaging();
+    String javaSource();
+    String javaTarget();
+    String javaRelease();
 
     public static POM create(File f) {
         FileChecks.checkFileExistsIsFileOfType(f,".pom");
@@ -36,7 +42,10 @@ public sealed interface POM permits  POM.POMImpl {
          private final POMStatus status;
          private ArtifactRef ref=ArtifactRef.MISSING_REF;
          private ArtifactRefSet deps=new ArtifactRefSet();
-
+         private String packaging = "jar";
+         private String javaSource;
+         private String javaTarget;
+         private String javaRelease;
 
         private POMImpl(POMStatus pomStatus) {
             status=pomStatus;
@@ -48,9 +57,49 @@ public sealed interface POM permits  POM.POMImpl {
             deps.addAll(dependencies);
         }
 
+        public POMImpl(ArtifactRef ref, List<ArtifactRef> dependencies, POMStatus status, String packaging, String javaSource, String javaTarget, String javaRelease) {
+            this.ref = ref;
+            this.deps.addAll(dependencies);
+            this.status = status;
+            this.packaging = packaging;
+            this.javaSource = javaSource;
+            this.javaTarget = javaTarget;
+            this.javaRelease = javaRelease;
+        }
+
         @Override
         public ArtifactRef artifact() {
             return ref;
+        }
+
+        @Override
+        public POMStatus status() {
+            return status;
+        }
+
+        @Override
+        public List<ArtifactRef> dependencies() {
+            return deps.toList();
+        }
+
+        @Override
+        public String packaging() {
+            return packaging;
+        }
+
+        @Override
+        public String javaSource() {
+            return javaSource;
+        }
+
+        @Override
+        public String javaTarget() {
+            return javaTarget;
+        }
+
+        @Override
+        public String javaRelease() {
+            return javaRelease;
         }
 
     }

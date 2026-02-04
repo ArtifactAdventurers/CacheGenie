@@ -13,4 +13,8 @@ public final class ArtifactRefSet {
         ObjectChecks.isPresent("dependencies",dependencies);
         deps.addAll(dependencies);
     }
+
+    public List<ArtifactRef> toList() {
+        return List.copyOf(deps);
+    }
 }
