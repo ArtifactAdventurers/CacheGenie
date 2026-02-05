@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -44,20 +45,18 @@ public class MetaAction {
 
 
         if (files == null || files.length == 0) return;
-
-
-        for (File f : files) {
+        
+        Arrays.stream(files).parallel().forEach(f -> {
             MavenMetaData meta = MavenMetaData.load(f);
-            if (meta == null || meta.gid == null || meta.aid == null) continue;
-
-
+            if (meta == null || meta.gid == null || meta.aid == null) return;
 
             log.info("Checking poms for {}:{}", meta.gid, meta.aid);
-            boolean changed = false;
-            for (String version : meta.versions.keySet()) {
+            final boolean[] changed = {false};
+
+            meta.versions.keySet().forEach(version -> {
                 if (!retryMissing && meta.isMissingPom(version)) {
                     log.debug("  Skipping known missing pom for {}:{}:{}", meta.gid, meta.aid, version);
-                    continue;
+                    return;
                 }
 
                 if (isPomMissing(meta.gid, meta.aid, version)) {
@@ -65,24 +64,30 @@ public class MetaAction {
                     boolean found = resolver.resolvePOM(meta.gid + ":" + meta.aid + ":" + version);
                     if (!found) {
                         log.warn("  Could not find pom for {}:{}:{}", meta.gid, meta.aid, version);
-                        meta.markPomAsMissing(version);
-                        changed = true;
+                        synchronized (meta) {
+                            meta.markPomAsMissing(version);
+                            changed[0] = true;
+                        }
                     } else if (meta.isMissingPom(version)) {
                         log.info("  Found previously missing pom for {}:{}:{}", meta.gid, meta.aid, version);
-                        meta.markPomAsFound(version);
-                        changed = true;
+                        synchronized (meta) {
+                            meta.markPomAsFound(version);
+                            changed[0] = true;
+                        }
                     }
                 }
-            }
+            });
 
-            if (changed) {
+            if (changed[0]) {
                 try {
-                    meta.save(f);
+                    synchronized (meta) {
+                        meta.save(f);
+                    }
                 } catch (IOException e) {
                     log.error("Failed to save updated meta properties for {}:{}: {}", meta.gid, meta.aid, e.getMessage());
                 }
             }
-        }
+        });
     }
 
     private boolean isPomMissing(String gid, String aid, String version) {

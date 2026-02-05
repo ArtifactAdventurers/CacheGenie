@@ -147,17 +147,18 @@ public class POMFileParser {
 
     public  static org.w3c.dom.Document parseXML(File base) {
         try {
-            String content = Files.readString(base.toPath(), StandardCharsets.UTF_8); content = content.trim();
-            if (content.contains("&oslash;") || content.contains("&nbsp;")) {
+            byte[] bytes = Files.readAllBytes(base.toPath());
+            String content = new String(bytes, StandardCharsets.UTF_8);
+            content = content.trim();
+            if (content.contains("&") && (content.contains("&oslash;") || content.contains("&nbsp;") || content.contains("&aacute;"))) {
                 content = content.replace("&oslash;", "&#248;")
-                                 .replace("&nbsp;", "&#160;");
-                return builder.parse(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
+                                 .replace("&nbsp;", "&#160;")
+                                 .replace("&aacute;", "&#225;");
             }
             return builder.parse(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
         }
         catch (Exception e) {
-
-            System.out.println("error "+e.getMessage()+" in "+base.getAbsolutePath());
+            System.out.println("error " + e.getMessage() + " in " + base.getAbsolutePath());
         }
         return null;
     }

@@ -8,8 +8,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.FileVisitResult;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 
 public class AnalyseAction {
     private static final Logger log = LoggerFactory.getLogger(AnalyseAction.class);
@@ -136,10 +143,42 @@ public class AnalyseAction {
         System.out.println("Total meta properties files: " + count);
     }
 
+    public void countPomsOnly() {
+        File repoRoot = cg.repoRoot();
+        log.info("Counting POM files in {}", repoRoot.getAbsolutePath());
+        if (!repoRoot.exists() || !repoRoot.isDirectory()) {
+            log.warn("Maven repository root not found at {}", repoRoot.getAbsolutePath());
+            return;
+        }
+        long start=System.currentTimeMillis();
+        long count = countFiles(repoRoot, ".pom");
+        long end=System.currentTimeMillis();
+        long duration=end-start;
+        long mins=duration/1000/60;
+        System.out.println("Total POM files: " + count+" in "+mins+" minutes");
+    }
+
     private long countFiles(File dir, String extension) {
         AtomicLong count = new AtomicLong(0);
-        walk(dir, extension, count);
-        return count.get();
+        try {
+            Files.walkFileTree(dir.toPath(), new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (file.getFileName().toString().endsWith(extension)) {
+                        count.incrementAndGet();
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+            return count.get();
+        } catch (IOException e) {
+            log.error("Failed to walk directory {}", dir.getAbsolutePath(), e);
+            return 0;
+        }
     }
 
     private void walk(File dir, String extension, AtomicLong count) {
