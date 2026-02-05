@@ -147,13 +147,13 @@ public class POMFileParser {
 
     public  static org.w3c.dom.Document parseXML(File base) {
         try {
-            String content = Files.readString(base.toPath(), StandardCharsets.UTF_8);
+            String content = Files.readString(base.toPath(), StandardCharsets.UTF_8); content = content.trim();
             if (content.contains("&oslash;") || content.contains("&nbsp;")) {
                 content = content.replace("&oslash;", "&#248;")
                                  .replace("&nbsp;", "&#160;");
                 return builder.parse(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
             }
-            return builder.parse(base);
+            return builder.parse(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
         }
         catch (Exception e) {
 

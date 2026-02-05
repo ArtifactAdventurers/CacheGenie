@@ -63,7 +63,7 @@ public class AnalyseAction {
         stats.uniqueArtifacts.entrySet().stream()
                 .sorted((e1, e2) -> Integer.compare(e2.getValue().size(), e1.getValue().size()))
                 .limit(5)
-                .forEach(e -> System.out.println("  " + e.getKey() + ": " + e.getValue().size() + " versions (" + e.getValue() + ")"));
+                .forEach(e -> System.out.println("  " + e.getKey() + ": " + e.getValue().size() ));
     }
 
     private void walkPom(File dir, PomStats stats) {
