@@ -195,6 +195,11 @@ public class Resolver {
     }
 
     private static RepositorySystem newRepositorySystem() {
+        /*
+         * Aether's components implement org.eclipse.aether.spi.locator.Service to ease manual wiring and to provide
+         * a simple plug-in mechanism. In the future, we might want to use a proper IoC container like Guice or
+         * Spring.
+         */
         DefaultServiceLocator locator = MavenRepositorySystemUtils.newServiceLocator();
         locator.addService(RepositoryConnectorFactory.class, BasicRepositoryConnectorFactory.class);
         locator.addService(TransporterFactory.class, FileTransporterFactory.class);

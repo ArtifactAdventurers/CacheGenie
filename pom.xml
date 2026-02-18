@@ -23,6 +23,7 @@
     <maven.compiler.target>22</maven.compiler.target>
     <maven.compiler.release>22</maven.compiler.release>
     <maven.version>3.6.0</maven.version>
+    <exec.mainClass>dev.gruff.hardstop.cachegenie.cli.Main</exec.mainClass>
 
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
@@ -80,18 +81,6 @@
       <artifactId>junit</artifactId>
       <version>4.13.2</version>
       <scope>test</scope>
-    </dependency>
-
-    <dependency>
-        <groupId>dev.gruff.hardstop</groupId>
-        <artifactId>api</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
-    </dependency>
-
-    <dependency>
-        <groupId>dev.gruff.hardstop</groupId>
-        <artifactId>core</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
     </dependency>
 
   <dependency>
@@ -164,6 +153,8 @@
       </plugin>
     </plugins>
   </build>
+
+
 
 
 </project>
