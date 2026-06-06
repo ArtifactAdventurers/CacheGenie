@@ -8,6 +8,9 @@ import dev.gruff.hardstop.treestreamer.URIHelper;
 import dev.gruff.hardstop.treestreamer.navigators.*;
 import dev.gruff.hardstop.treestreamer.streamers.URITreeSteamVisitorBuilder;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -20,6 +23,7 @@ import java.util.*;
 import static dev.gruff.hardstop.treestreamer.navigators.NavigatorPolicyBuilder.builder;
 
 public class IndexBuilder {
+    private static final Logger log = LoggerFactory.getLogger(IndexBuilder.class);
 
     CacheGenie genie;
     final NavigatorPolicy policy;
@@ -153,26 +157,28 @@ public class IndexBuilder {
 
     private void index(String arg) {
 
-        System.out.println("indexing "+arg);
+        log.info("indexing {}", arg);
         if (arg.startsWith("/")) arg = arg.substring(1);
-        String url = "repo1.maven.org/maven2/" + arg+"/";
+        String url = "repo1.maven.org/maven2/" + arg + "/";
         url = url.replace("//", "/");
         URI root = URI.create("https://" + url);
-        System.out.println("root "+root);
+        log.debug("root {}", root);
 
         URITreeSteamVisitorBuilder.newInstance(root)
                 .policy(policy)
                 .select()
                 .on(MavenMetaData.class)
-                  .consume(m -> handleMeta(m))
+                .consume(m -> handleMeta(m))
                 .on(LinkSetImpl.class)
-                  .consume(s -> s.stream().forEach(k -> System.out.println("ls:" + k.path())))
+                .consume(s -> {
+                    // if (log.isTraceEnabled()) s.stream().forEach(k -> log.trace("ls: {}", k.path()));
+                })
                 .on(Link.class)
-                  .consume(l -> System.out.println("file link: " + l.path().toASCIIString()))
+                .consume(l -> log.debug("file link: {}", l.path().toASCIIString()))
                 .otherwise()
-                  .consume(o -> {
-                      System.out.println("other:" + o);
-                  })
+                .consume(o -> {
+                    // log.trace("other: {}", o);
+                })
                 .visit();
 
     }
@@ -180,19 +186,19 @@ public class IndexBuilder {
     private void handleMeta(MavenMetaData m) {
 
         if (m.uri == null) {
-            System.out.println("meta has no uri");
+            log.warn("meta has no uri");
             return;
         }
-        System.out.println("meta link: "+m.uri);
+        log.debug("meta link: {}", m.uri);
         File local = toLocal(m.uri);
         if (local.exists()) {
-            System.out.print(m.gid.charAt(0));
+            // log.trace("local exists: {}", local);
         } else {
             local.getParentFile().mkdirs();
             try {
                 m.save(local);
             } catch (IOException e) {
-                System.out.println(e);
+                log.error("Failed to save meta: {}", e.getMessage());
             }
         }
     }
@@ -235,10 +241,14 @@ public class IndexBuilder {
                 .select()
                 .on(MavenMetaData.class)
                 .consume(m -> {
-                    System.out.println("read " + m);
+                    log.debug("read {}", m);
                     handleMeta(m); // save it
                     metas.add(m);
                 })
+                .otherwise()
+                  .consume(o -> {
+                      // ignore other things like links found during meta discovery
+                  })
                 .visit();
 
         if (metas.isEmpty()) return null;

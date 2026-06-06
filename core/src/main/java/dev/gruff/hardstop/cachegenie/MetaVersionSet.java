@@ -33,6 +33,7 @@ public final class MetaVersionSet {
                 versions.add(v);
                 byNames.put(v.value(),v);
                 Instant i=v.updated;
+                if (i == null) i = Instant.EPOCH;
                 List<MavenMetaData.Version> group=byDate.get(i);
                 if(group==null) {
                     group=new LinkedList<>();

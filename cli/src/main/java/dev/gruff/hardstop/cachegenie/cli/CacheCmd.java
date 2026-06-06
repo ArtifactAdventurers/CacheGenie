@@ -6,7 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
-@CommandLine.Command(name = "cache", description = "cache artifacts")
+@CommandLine.Command(name = "cache", aliases = {"hydrate", "fill"}, description = "cache artifacts")
 public class CacheCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(CacheCmd.class);
 
@@ -18,7 +18,15 @@ public class CacheCmd implements Runnable {
     @Override
     public void run() {
         CacheAction ca=new CacheAction(parent.genie());
-        ca.cache(depops.gid+":"+depops.aid+":"+depops.versionTargets.getFirst());
+        String target;
+        if (depops.gav != null) {
+            target = depops.gav;
+        } else if (depops.gid != null && depops.aid != null && depops.versionTargets != null && !depops.versionTargets.isEmpty()) {
+            target = depops.gid + ":" + depops.aid + ":" + depops.versionTargets.getFirst();
+        } else {
+            throw new CommandLine.ParameterException(new CommandLine(this), "Missing required options: use either --gav or --group-id, --artifact-id and --version");
+        }
+        ca.cache(target);
 
         log.info("Cache!");
         log.info("root {}", parent.repo);

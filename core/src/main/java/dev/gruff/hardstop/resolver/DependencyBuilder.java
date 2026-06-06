@@ -28,56 +28,53 @@ public class DependencyBuilder {
             DependencySet.Node an=nodes.get(a);
             if(an==null) {
                 // not seen this
-                an=toNode(a);
-              //  nodes.put(a,an);
-                visit(an,n);
+                an=toNode(n);
+                nodes.put(a, an);
+                for (DependencyNode k : n.getChildren()) {
+                    visit(an, k);
+                }
             }
-
-
         }
-
         return this;
-
-
     }
 
-    private DependencySet.Node toNode(Artifact a) {
+    private DependencySet.Node toNode(DependencyNode dn) {
+        Artifact a = dn.getArtifact();
         DependencySet.Node n=new DependencySet.Node();
         n.gid=a.getGroupId();
         n.aid=a.getArtifactId();
         n.ver=a.getVersion();
         n.type=a.getClassifier();
+        if (dn.getDependency() != null) {
+            n.scope = dn.getDependency().getScope();
+        }
         return n;
     }
 
 
     private  void visit(DependencySet.Node parent,DependencyNode dn) {
-
         Artifact a=dn.getArtifact(); // get the artifact for the dependency
-
         DependencySet.Node kid=nodes.get(a);
 
         if(kid!=null) {
             // we dont need to visit the children (been here)
             // just add the parent link and return
-            addLink(parent,kid);
+            addLink(parent, kid);
             return;
         } else {
             // new visit
-            kid=toNode(a);
+            kid=toNode(dn);
             nodes.put(a,kid);
-            addLink(parent,kid);
+            addLink(parent, kid);
             for(DependencyNode k: dn.getChildren()) {
-                visit(kid,k);
+                visit(kid, k);
             }
-
         }
-
-
     }
 
     private void addLink(DependencySet.Node parent, DependencySet.Node kid) {
-
+        if (parent.equals(kid)) return;
+        if (parent.gid.equals(kid.gid) && parent.aid.equals(kid.aid) && parent.ver.equals(kid.ver) && Objects.equals(parent.type, kid.type) && Objects.equals(parent.scope, kid.scope)) return;
         Set<DependencySet.Node> kids = links.computeIfAbsent(parent, k -> new HashSet<>());
         kids.add(kid);
     }

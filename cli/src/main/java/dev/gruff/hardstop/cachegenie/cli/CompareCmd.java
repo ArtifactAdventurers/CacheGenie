@@ -21,14 +21,8 @@ public class CompareCmd implements Runnable {
     @CommandLine.ParentCommand
     RootCmd parent;
 
-    @CommandLine.Option(names = {"-g",  "--gid" }, required = true, paramLabel = "groupID", description = "Group ID of component to analyse")
-    String gid;
-
-    @CommandLine.Option(names = {"-a",  "--aid" }, required = true, paramLabel = "artifactID", description = "Artifact ID of component to analyse")
-    String aid;
-
-    @CommandLine.Option(arity = "1..*", names = {"-v",  "--versions" }, required = true, paramLabel = "version List", description = "List of versions to analyse")
-    List<String> versionTargets;
+    @CommandLine.ArgGroup(exclusive = false, multiplicity = "1")
+    DepOps depops;
 
     @Override
     public void run() {
@@ -36,6 +30,26 @@ public class CompareCmd implements Runnable {
 
         CacheGenie cg = parent.genie();
         IndexAction ia = new IndexAction(cg);
+
+        String gid;
+        String aid;
+        List<String> versionTargets;
+
+        if (depops.gav != null) {
+            String[] parts = depops.gav.split(":");
+            if (parts.length < 3) {
+                throw new CommandLine.ParameterException(new CommandLine(this), "Invalid GAV format for compare. Expected group:artifact:version");
+            }
+            gid = parts[0];
+            aid = parts[1];
+            versionTargets = new java.util.ArrayList<>(List.of(parts[2]));
+        } else if (depops.gid != null && depops.aid != null && depops.versionTargets != null && !depops.versionTargets.isEmpty()) {
+            gid = depops.gid;
+            aid = depops.aid;
+            versionTargets = new java.util.ArrayList<>(depops.versionTargets);
+        } else {
+            throw new CommandLine.ParameterException(new CommandLine(this), "Missing required options: use either --gav or --group-id, --artifact-id and --version");
+        }
 
         MetaVersionSet versions = ia.versions(gid, aid);
 
@@ -65,12 +79,13 @@ public class CompareCmd implements Runnable {
         log.info("cache {}", parent.cache);
         log.info("gid {}", gid);
         log.info("aid {}", aid);
-        log.info("comparing versions {}", versions);
+        log.info("comparing versions {}", versionTargets);
 
         CompareAction ca=new CompareAction(cg);
 
         final MavenMetaData.Version[] last = {null};
-        versions.stream().forEach( mv -> {
+        versionTargets.forEach( v -> {
+            MavenMetaData.Version mv = versions.version(v);
             if(last[0] !=null) {
                 ca.compareVersions(gid,aid,last[0],mv);
             }

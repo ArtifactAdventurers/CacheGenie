@@ -7,14 +7,14 @@ import picocli.CommandLine;
 
 import java.util.List;
 
-@CommandLine.Command(name = "meta", description = "Download missing POM files for cached versions")
+@CommandLine.Command(name = "meta", aliases = {"fetch"}, description = "Download missing POM files for cached versions")
 public class MetaCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(MetaCmd.class);
 
     @CommandLine.ParentCommand
     RootCmd parent;
 
-    @CommandLine.Option(arity = "0..*", names = {"-gav", "--group-artifact-version"}, paramLabel = "GAV List", description = "List of group:artifact:version selectors to update meta data for.")
+    @CommandLine.Option(arity = "0..*", names = {"-gav", "--gav"}, paramLabel = "<gav>", description = "List of group:artifact:version selectors to update meta data for.")
     List<String> gavs;
 
     @CommandLine.Option(names = {"-u", "--update"}, description = "Retry downloading missing POMs")

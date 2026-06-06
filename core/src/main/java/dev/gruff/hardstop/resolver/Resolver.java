@@ -9,6 +9,8 @@ import org.eclipse.aether.*;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.CollectRequest;
+import org.eclipse.aether.collection.CollectResult;
+import org.eclipse.aether.collection.DependencyCollectionException;
 import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.graph.DependencyFilter;
@@ -156,6 +158,24 @@ public class Resolver {
         }
     }
 
+    private List<DependencyNode> collect0(String d) {
+        log.info("collecting dependencies for {}", d);
+        session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
+        Dependency dependency = new Dependency(new DefaultArtifact(d), JavaScopes.COMPILE);
+        CollectRequest cr = new CollectRequest(dependency, rrlist);
+
+        try {
+            CollectResult result = system.collectDependencies(session, cr);
+            if (result.getRoot() != null) {
+                log.info("Collected {} child dependencies for {}", result.getRoot().getChildren().size(), d);
+            }
+            return List.of(result.getRoot());
+        } catch (DependencyCollectionException e) {
+            log.info("Collection failed: {}", e.getMessage());
+        }
+        return List.of();
+    }
+
     private  List<DependencyNode> resolve0(String d)  {
 
         log.info("resolving {}",d);
@@ -217,7 +237,7 @@ public class Resolver {
 
 
     public DependencySet resolveGraph(String gid, String aid, String first) {
-        List<DependencyNode> roots=resolve0(gid+":"+aid+":"+first);
+        List<DependencyNode> roots=collect0(gid+":"+aid+":"+first);
         return DependencyBuilder
                 .newInstance()
                 .addDependencies(roots)

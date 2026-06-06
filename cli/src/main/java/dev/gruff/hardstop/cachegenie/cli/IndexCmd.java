@@ -10,15 +10,15 @@ import javax.xml.parsers.ParserConfigurationException;
 import java.net.URISyntaxException;
 import java.util.List;
 
-@CommandLine.Command(name = "index", description = "Index remote cache")
+@CommandLine.Command(name = "index", aliases = {"scan"}, description = "Index remote cache")
 public class IndexCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(IndexCmd.class);
 
     @CommandLine.ParentCommand
     RootCmd parent;
 
-    @CommandLine.Option(arity = "1..*", names = {"-gav",  "--group-artifact-version" }, required = true, paramLabel = "GA List", description = "List of group:artifact:version selectors to index. ")
-    List<String> gavs;
+    @CommandLine.Option(arity = "0..*", names = {"-gav",  "--gav" }, required = false, paramLabel = "<gav>", description = "List of group:artifact:version selectors to index. Defaults to '?' (random walk)")
+    List<String> gavs = List.of("?");
 
 
     @Override

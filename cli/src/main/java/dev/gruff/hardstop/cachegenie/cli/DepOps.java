@@ -7,12 +7,15 @@ import java.util.List;
 public final class DepOps {
 
 
-    @CommandLine.Option(names = {"-g",  "--gid" }, required = true, paramLabel = "groupID", description = "Group ID of component to analyse")
+    @CommandLine.Option(names = {"-gav", "--gav"}, paramLabel = "<gav>", description = "Group:Artifact:Version selector")
+    String gav;
+
+    @CommandLine.Option(names = {"-g",  "--group-id" }, paramLabel = "<group>", description = "Group ID of component to analyse")
     String gid;
 
-    @CommandLine.Option(names = {"-a",  "--aid" }, required = true, paramLabel = "artifactID", description = "Artifact ID of component to analyse")
+    @CommandLine.Option(names = {"-a",  "--artifact-id" }, paramLabel = "<artifact>", description = "Artifact ID of component to analyse")
     String aid;
 
-    @CommandLine.Option(arity = "1..*", names = {"-v",  "--versions" }, required = true, paramLabel = "version List", description = "List of versions to analyse")
+    @CommandLine.Option(arity = "1..*", names = {"-v",  "--version" }, paramLabel = "<version>", description = "List of versions to analyse")
     List<String> versionTargets;
 }

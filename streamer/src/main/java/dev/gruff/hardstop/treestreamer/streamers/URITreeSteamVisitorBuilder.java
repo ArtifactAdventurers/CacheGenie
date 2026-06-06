@@ -105,7 +105,7 @@ public final class URITreeSteamVisitorBuilder {
                    s.accept(o);
                }
                else {
-                   System.out.println("no consumer for "+o);
+                   // System.out.println("no consumer for "+o);
                }
            });
 

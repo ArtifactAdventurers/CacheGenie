@@ -8,6 +8,7 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Files;
 import java.time.Instant;
 import java.util.*;
 
@@ -151,6 +152,65 @@ public class MavenMetaData {
         }
 
         return meta;
+    }
+
+    public static MavenMetaData loadJSON(File f) {
+        try {
+            String content = Files.readString(f.toPath());
+            MavenMetaData meta = new MavenMetaData();
+            meta.gid = extractJSON(content, "groupId");
+            meta.aid = extractJSON(content, "artifactId");
+            meta.versions = new TreeMap<>();
+            meta.status = Status.has_properties;
+
+            // Very simplistic JSON parsing for versions
+            int versionsIdx = content.indexOf("\"versions\": [");
+            if (versionsIdx != -1) {
+                int start = versionsIdx + 13;
+                int end = content.lastIndexOf("]");
+                String versionsPart = content.substring(start, end);
+                String[] versionObjects = versionsPart.split("\\},");
+                for (String obj : versionObjects) {
+                    String vVal = extractJSON(obj, "version");
+                    if (vVal != null) {
+                        Version v = new Version();
+                        v.version = vVal;
+                        String published = extractJSON(obj, "published");
+                        if (published != null && !"null".equals(published)) {
+                            try {
+                                v.updated = Instant.parse(published);
+                            } catch (Exception e) {
+                                log.warn("Failed to parse published date '{}' for version {}: {}", published, vVal, e.getMessage());
+                            }
+                        }
+                        meta.versions.put(vVal, v);
+                        String missingPom = extractJSON(obj, "missingPom");
+                        if ("true".equals(missingPom)) meta.markPomAsMissing(vVal);
+                    }
+                }
+            }
+            return meta;
+        } catch (Exception e) {
+            log.error("Failed to load JSON meta {}: {}", f.getAbsolutePath(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static String extractJSON(String json, String key) {
+        int idx = json.indexOf("\"" + key + "\":");
+        if (idx == -1) return null;
+        int start = json.indexOf("\"", idx + key.length() + 3);
+        if (start == -1) {
+            // might be boolean or null
+            int valStart = idx + key.length() + 3;
+            int comma = json.indexOf(",", valStart);
+            if (comma == -1) comma = json.indexOf("}", valStart);
+            if (comma == -1) comma = json.indexOf("\n", valStart);
+            if (comma == -1) return null;
+            return json.substring(valStart, comma).trim();
+        }
+        int end = json.indexOf("\"", start + 1);
+        return json.substring(start + 1, end);
     }
 
     private static Instant toInstant(String updated) {

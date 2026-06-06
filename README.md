@@ -1,6 +1,13 @@
 # CacheGenie
 
-CacheGenie is a command-line tool designed to manage and analyze Maven artifact caches. It provides a suite of tools to index remote repositories, cache artifacts locally, analyze API differences between versions, and visualize dependency graphs. It is particularly useful for developers and DevOps engineers who need to understand artifact evolution and dependency structures within the Maven ecosystem.
+CacheGenie is a command-line tool designed to manage and analyze Maven artifact caches. It provides a structured workflow to discover artifacts, fetch metadata, analyze dependencies, and hydrate local storage.
+
+### The "Genie" Workflow
+To get the most out of CacheGenie, follow this natural progression:
+1.  **`scan` (or `index`)**: Discover what versions of an artifact exist in remote repositories.
+2.  **`fetch` (or `meta`)**: Download the "recipes" (POM files) for those discovered versions.
+3.  **`map` (or `graph`)**: Analyze and visualize the dependency structures.
+4.  **`hydrate` (or `cache`)**: Download the actual JAR files into your local repository.
 
 ## Key Features
 
@@ -46,16 +53,16 @@ java -jar target/cachegenie-0.0.1.jar [GLOBAL-OPTIONS] COMMAND [COMMAND-OPTIONS]
 
 ### Commands and Subcommands
 
-#### `index`
+#### `index` (alias: `scan`)
 Indexes a remote repository for specific artifacts or performs a discovery scan.
 
 ```bash
-index -gav=<GAV-Selector>...
+index --gav <GAV-Selector>...
 ```
--   `-gav, --group-artifact-version=<GAV-Selector>`: One or more `group:artifact:version` strings to index.
--   **Discovery Scan**: Use `?` to perform a "random walk" discovery of the remote repository:
+-   `-gav, --gav <GAV-Selector>`: One or more `group:artifact:version` strings to index.
+-   **Discovery Scan**: Defaults to a "random walk" discovery if no GAV is provided:
     ```bash
-    index -gav="?"
+    index
     ```
     This scans top-level groups and deep-scans for metadata, maintaining state in `cachegenie/work/index_build` for resumability.
 
@@ -66,42 +73,49 @@ Generates a local database from the previously indexed information.
 db
 ```
 
-#### `meta`
+#### `meta` (alias: `fetch`)
 Scans cached metadata and downloads any missing POM files for the versions listed. It does not re-download existing POMs or JARs.
 
 ```bash
-meta [-u] [-gav=<GAV-Selector>...]
+meta [-u] [-gav <gav>...]
 ```
--   `-gav, --group-artifact-version=<GAV-Selector>`: One or more `group:artifact:version` strings to filter the meta-scan.
+-   `-gav, --gav <gav>`: One or more `group:artifact:version` strings to filter the meta-scan.
 -   `-u, --update`: Force a retry for downloading POM files that were previously marked as missing.
 
-#### `cache`
+#### `cache` (alias: `hydrate`, `fill`)
 Downloads and caches specific artifacts into the local Maven cache.
 
 ```bash
-cache -g=<groupID> -a=<artifactID> -v=<version>...
+cache --gav <gav>
+# OR
+cache -g <group> -a <artifact> -v <version>
 ```
--   `-g, --gid=<groupID>`: The Group ID of the artifact.
--   `-a, --aid=<artifactID>`: The Artifact ID.
--   `-v, --versions=<version>`: List of versions to download.
+-   `-gav, --gav <gav>`: The `group:artifact:version` of the artifact.
+-   `-g, --group-id <group>`: The Group ID.
+-   `-a, --artifact-id <artifact>`: The Artifact ID.
+-   `-v, --version <version>`: The version to download.
 
 #### `compare`
 Performs an API comparison between versions of an artifact.
 
 ```bash
-compare -g=<groupID> -a=<artifactID> -v=<version1> [-v=<version2> ...]
+compare --gav <gav>
+# OR
+compare -g <group> -a <artifact> -v <version> [-v <version> ...]
 ```
 -   If only one version is provided, it is compared against the immediately preceding version (if found in the index).
 -   If multiple versions are provided, it performs sequential comparisons.
 
-#### `graph`
+#### `graph` (alias: `map`)
 Generates dependency graphs.
 
 -   **`graph artifact`**: Generates a dependency graph for a specific artifact.
     ```bash
-    graph artifact -g=<groupID> -a=<artifactID> -v=<version> [-f=<format>]
+    graph artifact --gav <gav>
+    # OR
+    graph artifact -g <group> -a <artifact> -v <version> [-f <format>]
     ```
-    -   `-f, --format=<format>`: Output format (defaults to `dot`).
+    -   `-f, --format <format>`: Output format (defaults to `dot`).
 -   **`graph cache`**: Generates a combined graph representing the contents of the local cache.
     ```bash
     graph cache

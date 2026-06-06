@@ -8,7 +8,7 @@ public class AnalysePomCmd implements Runnable {
     @CommandLine.ParentCommand
     AnalyseCmd parent;
 
-    @CommandLine.Option(names = {"-c", "--count"}, description = "Only count POM files without analysis")
+    @CommandLine.Option(names = {"-C", "--count"}, description = "Only count POM files without analysis")
     boolean countOnly = false;
 
     @Override

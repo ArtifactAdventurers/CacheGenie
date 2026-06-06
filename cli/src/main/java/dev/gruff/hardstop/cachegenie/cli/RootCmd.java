@@ -8,7 +8,34 @@ import java.net.URI;
 
 
 
-@CommandLine.Command(name = "cachegenie", mixinStandardHelpOptions = true, subcommands = {IndexCmd.class,DBCmd.class, CompareCmd.class, CacheCmd.class,GraphCmd.class, MetaCmd.class, MetaCSVCmd.class, AnalyseCmd.class, MigrateMetaCmd.class})
+@CommandLine.Command(name = "cachegenie", mixinStandardHelpOptions = true,
+        description = "A tool to manage and analyze Maven artifact caches.",
+        header = {
+                "CacheGenie helps you discover, fetch, and analyze Maven artifacts.",
+                "It works by layering metadata and artifacts in your local cache."
+        },
+        footer = {
+                "",
+                "Normal Operation (The 'Genie' Workflow):",
+                "  1. scan (index)  : Discover versions of an artifact in remote repositories.",
+                "  2. fetch (meta)  : Download the POM 'recipes' for those versions.",
+                "  3. map (graph)   : Analyze and visualize the dependency structures.",
+                "  4. hydrate (fill): Download the actual JAR files into your local repository.",
+                "",
+                "Analysis and Persistence:",
+                "  - map artifact   : Resolves dependencies and persists them to a local DuckDB.",
+                "  - map query      : Execute SQL queries against the persisted dependency graph.",
+                "",
+                "Data Locations:",
+                "  - Local Repository: Artifacts (JARs/POMs) are stored in your Maven repository (default: ~/.m2/repository).",
+                "  - Metadata: Discovery info and analysis results are stored in ~/.m2/cachegenie/meta.",
+                "",
+                "Example:",
+                "  cachegenie scan --gav org.slf4j:slf4j-api",
+                "  cachegenie fetch --gav org.slf4j:slf4j-api:2.0.9",
+                "  cachegenie map artifact --gav org.slf4j:slf4j-api:2.0.9"
+        },
+        subcommands = {IndexCmd.class, DBCmd.class, CompareCmd.class, CacheCmd.class, GraphCmd.class, MetaCmd.class, MetaCSVCmd.class, AnalyseCmd.class, MigrateMetaCmd.class})
 
 public class RootCmd  {
 
