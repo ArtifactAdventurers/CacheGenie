@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>dev.gruff.hardstop</groupId>
+        <artifactId>cachegenie</artifactId>
+        <version>0.0.1</version>
+    </parent>
+
+    <artifactId>viewer</artifactId>
+
+    <properties>
+        <maven.compiler.source>22</maven.compiler.source>
+        <maven.compiler.target>22</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <!--
+      The browser-based dependency viewer.
+
+      Deliberately lean: it uses only the JDK's built-in HTTP server
+      (com.sun.net.httpserver, module jdk.httpserver) plus the DuckDB JDBC
+      driver and SLF4J, all of which are inherited from the reactor root pom.
+      The only explicit dependency is cachegenie-core, for the CacheGenie
+      facade and the graph.db location.
+
+      All web assets live in src/main/resources/webui and are served from the
+      classpath, so they ship inside the shaded jar.
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>dev.gruff.hardstop</groupId>
+            <artifactId>cachegenie-core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+    </dependencies>
+
+</project>

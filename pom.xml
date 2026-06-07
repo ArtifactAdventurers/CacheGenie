@@ -9,6 +9,7 @@
   <modules>
     <module>streamer</module>
     <module>core</module>
+    <module>viewer</module>
     <module>cli</module>
     <module>release</module>
   </modules>
@@ -53,6 +54,11 @@
       <dependency>
           <groupId>dev.gruff.hardstop</groupId>
           <artifactId>cli</artifactId>
+          <version>${project.version}</version>
+      </dependency>
+      <dependency>
+          <groupId>dev.gruff.hardstop</groupId>
+          <artifactId>viewer</artifactId>
           <version>${project.version}</version>
       </dependency>
     </dependencies>

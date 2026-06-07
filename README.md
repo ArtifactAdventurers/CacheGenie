@@ -121,6 +121,10 @@ Generates dependency graphs.
     graph cache
     ```
 
+## Database Schema
+
+CacheGenie persists graph data in a local DuckDB database. For detailed information on the tables and how to query them, see the [DuckDB Graph Database Schema](DB_SCHEMA.md).
+
 ## License
 
 This project is licensed under the terms of the `LICENSE` file included in the repository.

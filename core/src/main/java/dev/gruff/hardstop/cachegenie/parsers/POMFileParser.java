@@ -4,8 +4,12 @@ import dev.gruff.hardstop.cachegenie.entities.ArtifactRef;
 import dev.gruff.hardstop.cachegenie.entities.POM;
 import dev.gruff.hardstop.cachegenie.entities.POMStatus;
 import dev.gruff.hardstop.cachegenie.utils.FileChecks;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import org.xml.sax.ErrorHandler;
+import org.xml.sax.SAXParseException;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -27,8 +31,7 @@ import static dev.gruff.hardstop.cachegenie.parsers.ParserHelper.*;
 
 public class POMFileParser {
 
-
-
+    private static final Logger log = LoggerFactory.getLogger(POMFileParser.class);
 
     private static final DocumentBuilder builder=build();
     private static final Transformer transformer=createTransformer();
@@ -158,7 +161,7 @@ public class POMFileParser {
             return builder.parse(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
         }
         catch (Exception e) {
-            System.out.println("error " + e.getMessage() + " in " + base.getAbsolutePath());
+            log.warn("Skipping malformed POM {}: {}", base.getAbsolutePath(), e.getMessage());
         }
         return null;
     }
@@ -169,7 +172,29 @@ public class POMFileParser {
         DocumentBuilderFactory factory =
                 DocumentBuilderFactory.newInstance();
         try {
-            return factory.newDocumentBuilder();
+            DocumentBuilder b = factory.newDocumentBuilder();
+            // Replace the JAXP default handler, which prints "[Fatal Error] ..."
+            // straight to stderr. A malformed POM is a failure for *that* file,
+            // not for the run, so downgrade to a WARN. parseXML still catches the
+            // re-thrown exception and returns POMStatus.XML_ERROR so the walk
+            // continues to the next POM.
+            b.setErrorHandler(new ErrorHandler() {
+                @Override
+                public void warning(SAXParseException e) {
+                    log.warn("POM XML warning ({}:{}): {}", e.getLineNumber(), e.getColumnNumber(), e.getMessage());
+                }
+
+                @Override
+                public void error(SAXParseException e) throws SAXParseException {
+                    throw e;
+                }
+
+                @Override
+                public void fatalError(SAXParseException e) throws SAXParseException {
+                    throw e;
+                }
+            });
+            return b;
         } catch (ParserConfigurationException e) {
             throw new RuntimeException(e);
         }

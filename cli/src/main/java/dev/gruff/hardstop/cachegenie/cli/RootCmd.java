@@ -35,7 +35,7 @@ import java.net.URI;
                 "  cachegenie fetch --gav org.slf4j:slf4j-api:2.0.9",
                 "  cachegenie map artifact --gav org.slf4j:slf4j-api:2.0.9"
         },
-        subcommands = {IndexCmd.class, DBCmd.class, CompareCmd.class, CacheCmd.class, GraphCmd.class, MetaCmd.class, MetaCSVCmd.class, AnalyseCmd.class, MigrateMetaCmd.class})
+        subcommands = {IndexCmd.class, DBCmd.class, CompareCmd.class, CacheCmd.class, GraphCmd.class, MetaCmd.class, MetaCSVCmd.class, AnalyseCmd.class, MigrateMetaCmd.class, ViewCmd.class})
 
 public class RootCmd  {
 

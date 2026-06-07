@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>CacheGenie — Dependency Viewer</title>
+    <link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+<header class="topbar">
+    <div class="brand">CacheGenie<span>dependency viewer</span></div>
+    <div class="search">
+        <input id="search" type="text" autocomplete="off" placeholder="Search artifacts (group:artifact:version)…"/>
+        <div id="results" class="results hidden"></div>
+    </div>
+    <div class="controls">
+        <label>Scope
+            <select id="scope">
+                <option value="all">all</option>
+                <option value="compile">compile</option>
+                <option value="runtime">runtime</option>
+                <option value="provided">provided</option>
+                <option value="test">test</option>
+                <option value="system">system</option>
+                <option value="import">import</option>
+            </select>
+        </label>
+        <label>Dependents <input id="up" type="number" min="0" max="6" value="1"/></label>
+        <label>Depth <input id="down" type="number" min="0" max="6" value="2"/></label>
+    </div>
+</header>
+
+<main>
+    <section id="graph-pane" class="graph-pane">
+        <svg id="graph" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+                        orient="auto-start-reverse">
+                    <path d="M0,0 L10,5 L0,10 z" fill="var(--edge)"/>
+                </marker>
+            </defs>
+            <g id="edges"></g>
+            <g id="nodes"></g>
+        </svg>
+        <div id="hint" class="hint">Search for an artifact above to explore its dependency graph.</div>
+        <div class="legend">
+            <span><i class="swatch focus"></i>focus</span>
+            <span><i class="swatch dep"></i>dependency</span>
+            <span><i class="swatch dependent"></i>dependent</span>
+        </div>
+    </section>
+
+    <aside id="detail" class="detail">
+        <div id="detail-body" class="detail-body">
+            <div id="stats" class="stats"></div>
+        </div>
+    </aside>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

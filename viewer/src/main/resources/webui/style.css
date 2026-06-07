@@ -1,0 +1,177 @@
+:root {
+    --bg: #0f1419;
+    --panel: #171d26;
+    --panel-2: #1f2733;
+    --border: #2b3543;
+    --text: #d7dee8;
+    --muted: #8a97a8;
+    --accent: #4ea1ff;
+    --focus: #ffb454;
+    --dep: #4ea1ff;
+    --dependent: #6ad08a;
+    --edge: #56657a;
+    --scope-compile: #4ea1ff;
+    --scope-runtime: #6ad08a;
+    --scope-provided: #b08cff;
+    --scope-test: #ff9d5c;
+    --scope-none: #6b7787;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+body { display: flex; flex-direction: column; }
+
+.topbar {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 10px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+}
+
+.brand { font-weight: 700; font-size: 16px; white-space: nowrap; }
+.brand span {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--muted);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+.search { position: relative; flex: 1 1 auto; max-width: 560px; }
+.search input {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 14px;
+}
+.search input:focus { outline: none; border-color: var(--accent); }
+
+.results {
+    position: absolute;
+    top: 110%;
+    left: 0;
+    right: 0;
+    max-height: 360px;
+    overflow-y: auto;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    z-index: 20;
+    box-shadow: 0 12px 30px rgba(0,0,0,.45);
+}
+.results .row { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
+.results .row:last-child { border-bottom: none; }
+.results .row:hover { background: var(--border); }
+.results .ga { color: var(--text); }
+.results .ver { color: var(--muted); margin-left: 6px; font-size: 12px; }
+
+.controls { display: flex; gap: 14px; align-items: center; }
+.controls label { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+.controls select, .controls input {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 5px 7px;
+}
+.controls input[type=number] { width: 52px; }
+
+main { flex: 1 1 auto; display: flex; min-height: 0; }
+
+.graph-pane { position: relative; flex: 1 1 auto; min-width: 0; background:
+    radial-gradient(circle at 1px 1px, #1c2530 1px, transparent 0) 0 0 / 26px 26px; }
+#graph { width: 100%; height: 100%; cursor: grab; }
+#graph.panning { cursor: grabbing; }
+
+.hint {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: var(--muted); pointer-events: none; text-align: center;
+}
+.legend {
+    position: absolute; bottom: 12px; left: 12px;
+    display: flex; gap: 14px; font-size: 12px; color: var(--muted);
+    background: rgba(15,20,25,.7); padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
+}
+.legend .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.swatch.focus { background: var(--focus); }
+.swatch.dep { background: var(--dep); }
+.swatch.dependent { background: var(--dependent); }
+
+.detail {
+    flex: 0 0 360px;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+}
+.detail-body { padding: 16px; }
+
+.detail h2 { font-size: 15px; margin: 0 0 2px; word-break: break-all; }
+.detail .coord { color: var(--muted); font-size: 12px; word-break: break-all; margin-bottom: 14px; }
+
+.section { margin-bottom: 18px; }
+.section h3 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 5px;
+}
+.section h3 .count { color: var(--text); }
+
+.chip {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 7px; cursor: pointer;
+    border: 1px solid transparent;
+}
+.chip:hover { background: var(--panel-2); border-color: var(--border); }
+.chip .label { flex: 1 1 auto; min-width: 0; }
+.chip .label .ga { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip .label .ver { color: var(--muted); font-size: 12px; }
+
+.badge {
+    font-size: 10px; padding: 2px 6px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); white-space: nowrap;
+}
+.badge.scope-compile { color: var(--scope-compile); border-color: var(--scope-compile); }
+.badge.scope-runtime { color: var(--scope-runtime); border-color: var(--scope-runtime); }
+.badge.scope-provided { color: var(--scope-provided); border-color: var(--scope-provided); }
+.badge.scope-test { color: var(--scope-test); border-color: var(--scope-test); }
+
+.tcontrols { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+.tcontrols select, .tcontrols input { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 6px; }
+.tcontrols input[type=number] { width: 46px; }
+.btn { background: var(--accent); color: #06223f; border: none; border-radius: 6px; padding: 5px 10px; cursor: pointer; font-weight: 600; }
+.btn:hover { filter: brightness(1.08); }
+
+.muted { color: var(--muted); }
+.stats .stat { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.stats .big { font-size: 22px; font-weight: 700; }
+.hidden { display: none; }
+
+/* SVG nodes */
+.node rect { fill: var(--panel-2); stroke: var(--border); stroke-width: 1.5; rx: 8; ry: 8; cursor: pointer; }
+.node:hover rect { stroke: var(--accent); }
+.node.focus rect { fill: #3a2c14; stroke: var(--focus); stroke-width: 2; }
+.node.dep rect { stroke: var(--dep); }
+.node.dependent rect { stroke: var(--dependent); }
+.node text { fill: var(--text); font-size: 12px; pointer-events: none; }
+.node text.aid { font-weight: 600; }
+.node text.ver { fill: var(--muted); font-size: 11px; }
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.4; }
+.edge.scope-compile { stroke: var(--scope-compile); }
+.edge.scope-runtime { stroke: var(--scope-runtime); }
+.edge.scope-provided { stroke: var(--scope-provided); }
+.edge.scope-test { stroke: var(--scope-test); }
+#arrow path { fill: var(--edge); }
