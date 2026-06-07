@@ -2,6 +2,7 @@ package dev.gruff.hardstop.cachegenie.actions;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.MavenMetaData;
+import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.resolver.Resolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,12 +46,15 @@ public class MetaAction {
 
 
         if (files == null || files.length == 0) return;
-        
+
+        Progress progress = Progress.start("Fetch POMs");
+
         Arrays.stream(files).parallel().forEach(f -> {
             MavenMetaData meta = MavenMetaData.load(f);
             if (meta == null || meta.gid == null || meta.aid == null) return;
 
             log.info("Checking poms for {}:{}", meta.gid, meta.aid);
+            progress.tick(meta.gid + ":" + meta.aid);
             final boolean[] changed = {false};
 
             meta.versions.keySet().forEach(version -> {
@@ -88,6 +92,8 @@ public class MetaAction {
                 }
             }
         });
+
+        progress.done();
     }
 
     private boolean isPomMissing(String gid, String aid, String version) {

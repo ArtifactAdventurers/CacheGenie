@@ -3,10 +3,12 @@ package dev.gruff.hardstop.cachegenie.cli;
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.cachegenie.MetaVersionSet;
+import dev.gruff.hardstop.cachegenie.entities.POMStatus;
 import dev.gruff.hardstop.cachegenie.actions.CacheAction;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
 import dev.gruff.hardstop.cachegenie.graph.DotViz;
 import dev.gruff.hardstop.cachegenie.graph.GraphRepository;
+import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.resolver.DependencySet;
 import dev.gruff.hardstop.resolver.Resolver;
 import org.slf4j.Logger;
@@ -35,14 +37,65 @@ public class GraphCmd  {
 
         @Override
         public void run() {
-            log.info("Graph");
+            log.info("Graph cache: building combined dependency graph from local cache");
 
             CacheGenie cg = parent.parent.genie();
-            CacheAction ca=new CacheAction(cg);
-            ca.stream().forEach(f -> {
-                log.info(f.artifact().value());
+            CacheAction ca = new CacheAction(cg);
+            GraphRepository gr = new GraphRepository(cg.cacheGenieRoot());
+            Resolver r = Resolver.Builder(cg).build();
+            Progress progress = Progress.start("Graph cache");
+
+            // [0]=POMs read, [1]=parse-skipped, [2]=already in db,
+            // [3]=resolve-failed, [4]=persisted, [5]=nodes, [6]=links
+            long[] c = new long[7];
+
+            ca.stream().forEach(pom -> {
+                c[0]++;
+                if (pom.status() != POMStatus.OK) {
+                    c[1]++;
+                    progress.tick(pom.artifact().value() + " [" + pom.status() + "]");
+                    return;
+                }
+
+                var ref = pom.artifact();
+                String gid = ref.groupID().value();
+                String aid = ref.artifactID().value();
+                String ver = ref.version().value();
+                String gav = gid + ":" + aid + ":" + ver;
+                progress.tick(gav);
+
+                if (gr.isArtifactPresent(gid, aid, ver)) {
+                    c[2]++;
+                    return;
+                }
+
+                try {
+                    DependencySet set = r.resolveGraph(gid, aid, ver);
+                    if (set == null || set.getNodes().isEmpty()) {
+                        c[3]++;
+                        log.warn("Could not resolve dependency graph for {}", gav);
+                        return;
+                    }
+                    gr.persist(set);
+                    c[4]++;
+                    c[5] += set.getNodes().size();
+                    for (Set<DependencySet.Node> kids : set.getLinks().values()) {
+                        if (kids != null) c[6] += kids.size();
+                    }
+                } catch (Exception e) {
+                    c[3]++;
+                    log.warn("Failed to resolve {}: {}", gav, e.getMessage());
+                }
             });
 
+            progress.done();
+
+            System.out.printf(
+                    "Graph cache complete: %d POMs scanned (%d malformed, %d already persisted), "
+                  + "%d newly persisted, %d failed to resolve%n",
+                    c[0], c[1], c[2], c[4], c[3]);
+            System.out.printf("Added %d nodes and %d links%n", c[5], c[6]);
+            System.out.println("Graph persisted to " + new File(cg.cacheGenieRoot(), "graph.db").getAbsolutePath());
         }
 
     }

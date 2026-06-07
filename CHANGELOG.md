@@ -7,6 +7,14 @@ and this project adheres to Semantic Versioning (https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+- Global `-P/--progress` option that emits throttled progress messages to stderr during long-running commands (index/scan, meta/fetch, graph cache, analyse, hydrate).
+- `graph cache` now resolves and persists the dependency graph for every artifact in the local cache to the DuckDB graph (skipping artifacts already present), instead of only listing them.
+
+### Changed
+- Malformed POMs now log a WARN naming the file and are skipped, instead of emitting a raw `[Fatal Error] ...` line to stderr; processing continues. A custom SAX `ErrorHandler` replaces the JAXP default.
+- Routed `CacheAction`'s stray `System.out`/`printStackTrace` output through SLF4J for consistent logging.
+
 ## [0.1.0] - 2025-10-11
 
 Inferred SemVer bump: Minor (new features added without known breaking changes).

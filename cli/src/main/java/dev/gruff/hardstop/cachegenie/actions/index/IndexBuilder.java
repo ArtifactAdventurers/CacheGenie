@@ -3,6 +3,7 @@ package dev.gruff.hardstop.cachegenie.actions.index;
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.cachegenie.MavenMetaDataFactory;
+import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.treestreamer.ContentType;
 import dev.gruff.hardstop.treestreamer.URIHelper;
 import dev.gruff.hardstop.treestreamer.navigators.*;
@@ -28,6 +29,7 @@ public class IndexBuilder {
     CacheGenie genie;
     final NavigatorPolicy policy;
     final MavenMetaDataFactory mb;
+    private final Progress progress = Progress.start("Index", 50, 2000L);
 
     public IndexBuilder(CacheGenie cg) {
         genie = cg;
@@ -87,6 +89,7 @@ public class IndexBuilder {
             }
         }
 
+        progress.done();
     }
 
     private void randomWalk() throws IOException {
@@ -189,6 +192,7 @@ public class IndexBuilder {
             log.warn("meta has no uri");
             return;
         }
+        progress.tick(m.gid + ":" + m.aid);
         log.debug("meta link: {}", m.uri);
         File local = toLocal(m.uri);
         if (local.exists()) {

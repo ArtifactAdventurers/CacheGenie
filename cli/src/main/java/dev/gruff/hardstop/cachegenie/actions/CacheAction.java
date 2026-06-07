@@ -2,10 +2,13 @@ package dev.gruff.hardstop.cachegenie.actions;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.entities.POM;
+import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.resolver.Resolver;
 import dev.gruff.hardstop.treestreamer.streamers.FileSystemTreeStreamer;
 import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.resolution.DependencyResolutionException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.util.List;
@@ -14,6 +17,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 public class CacheAction {
+    private static final Logger log = LoggerFactory.getLogger(CacheAction.class);
     private final CacheGenie cg;
     public CacheAction(CacheGenie cg) {
         this.cg=cg;
@@ -26,12 +30,13 @@ public class CacheAction {
      public void cache(List<String> args) {
 
          Resolver mc=Resolver.Builder(cg).build();
+         Progress progress = Progress.start("Hydrate cache", 1, 0L);
         for (String d : args) {
-            System.out.println("resolve "+d);
+            log.info("resolve {}", d);
             cache(d, mc);
-
-
+            progress.tick(d);
         }
+        progress.done();
     }
 
     private  void cache(String d, Resolver mc) {
@@ -46,9 +51,9 @@ public class CacheAction {
             }*/
 
         } catch (DependencyResolutionException e) {
-            e.printStackTrace();
+            log.error("Failed to resolve {}: {}", d, e.getMessage(), e);
         } catch(IllegalStateException jle) {
-            jle.printStackTrace();
+            log.error("Failed to resolve {}: {}", d, jle.getMessage(), jle);
         }
     }
 

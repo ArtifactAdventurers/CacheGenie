@@ -4,6 +4,7 @@ import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.entities.ArtifactRef;
 import dev.gruff.hardstop.cachegenie.entities.POM;
 import dev.gruff.hardstop.cachegenie.entities.POMStatus;
+import dev.gruff.hardstop.cachegenie.utils.Progress;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,7 +36,9 @@ public class AnalyseAction {
         }
 
         PomStats stats = new PomStats();
-        walkPom(repoRoot, stats);
+        Progress progress = Progress.start("Analyse POMs");
+        walkPom(repoRoot, stats, progress);
+        progress.done();
 
         System.out.println("\n--- Maven Repository POM Analysis ---");
         System.out.println("Location: " + repoRoot.getAbsolutePath());
@@ -73,14 +76,15 @@ public class AnalyseAction {
                 .forEach(e -> System.out.println("  " + e.getKey() + ": " + e.getValue().size() ));
     }
 
-    private void walkPom(File dir, PomStats stats) {
+    private void walkPom(File dir, PomStats stats, Progress progress) {
         File[] files = dir.listFiles();
         if (files != null) {
             for (File f : files) {
                 if (f.isDirectory()) {
-                    walkPom(f, stats);
+                    walkPom(f, stats, progress);
                 } else if (f.getName().endsWith(".pom")) {
                     stats.totalFiles++;
+                    progress.tick(f.getName());
                     try {
                         POM pom = POM.create(f);
                         if (pom.status() == POMStatus.OK) {

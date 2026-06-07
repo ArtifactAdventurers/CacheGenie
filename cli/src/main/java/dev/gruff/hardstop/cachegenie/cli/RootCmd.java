@@ -1,6 +1,7 @@
 package dev.gruff.hardstop.cachegenie.cli;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
+import dev.gruff.hardstop.cachegenie.utils.Progress;
 import picocli.CommandLine;
 
 import java.io.File;
@@ -46,6 +47,11 @@ public class RootCmd  {
 
     @CommandLine.Option(names = {"-r", "--repo"}, description = "Default remote repository")
     public URI repo=CacheGenie.defaultRemoteRepo();
+
+    @CommandLine.Option(names = {"-P", "--progress"}, description = "Emit periodic progress messages to stderr during long-running commands.")
+    public void setProgress(boolean enabled) {
+        Progress.setEnabled(enabled);
+    }
 
     @CommandLine.Option(names = {"-l", "--log"}, description = "Log level (trace, debug, info, warn, error)", defaultValue = "info")
     public void setLogLevel(String level) {
