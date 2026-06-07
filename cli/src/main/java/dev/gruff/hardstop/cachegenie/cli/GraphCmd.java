@@ -8,6 +8,7 @@ import dev.gruff.hardstop.cachegenie.actions.CacheAction;
 import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
 import dev.gruff.hardstop.cachegenie.graph.DotViz;
 import dev.gruff.hardstop.cachegenie.graph.GraphRepository;
+import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
 import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.resolver.DependencySet;
 import dev.gruff.hardstop.resolver.Resolver;
@@ -199,53 +200,9 @@ public class GraphCmd  {
 
         private void processPattern(CacheGenie cg, IndexAction ia, String gid, String aid, String version) {
             log.info("Processing pattern {}:{}:{}", gid, aid, version);
-            File metaDir = new File(cg.cacheGenieRoot(), "meta");
-            List<MavenMetaData> matched = new java.util.ArrayList<>();
-
-            if (metaDir.exists()) {
-                // New JSON structure
-                String groupPath = gid.replace('.', '/');
-                File groupDir = new File(metaDir, groupPath);
-                if (groupDir.exists()) {
-                    if (aid == null || aid.equals("*")) {
-                        // Scan all artifacts in group
-                        File[] artifactDirs = groupDir.listFiles(File::isDirectory);
-                        if (artifactDirs != null) {
-                            for (File ad : artifactDirs) {
-                                MavenMetaData m = loadMeta(ad);
-                                if (m != null) matched.add(m);
-                            }
-                        }
-                    } else {
-                        File artifactDir = new File(groupDir, aid);
-                        if (artifactDir.exists()) {
-                            MavenMetaData m = loadMeta(artifactDir);
-                            if (m != null) matched.add(m);
-                        }
-                    }
-                }
-            }
-
-            // Legacy properties files
-            File[] legacyFiles = cg.cacheGenieRoot().listFiles((dir, name) -> name.endsWith(".properties"));
-            if (legacyFiles != null) {
-                for (File f : legacyFiles) {
-                    String name = f.getName();
-                    String ga = name.substring(0, name.length() - 11); // remove .properties
-                    String[] parts = ga.split(":");
-                    if (parts.length == 2) {
-                        if (parts[0].equals(gid)) {
-                            if (aid == null || aid.equals("*") || parts[1].equals(aid)) {
-                                // check if already added from JSON
-                                boolean exists = matched.stream().anyMatch(m -> m.gid.equals(parts[0]) && m.aid.equals(parts[1]));
-                                if (!exists) {
-                                    matched.add(MavenMetaData.load(f));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            MetaRepository metaRepo = new MetaRepository(cg.cacheGenieRoot());
+            String aidFilter = (aid == null || aid.equals("*")) ? null : aid;
+            List<MavenMetaData> matched = metaRepo.loadByPattern(gid, aidFilter);
 
             if (matched.isEmpty()) {
                 System.err.println("No metadata found matching pattern " + gid + ":" + (aid == null ? "*" : aid));
@@ -292,14 +249,6 @@ public class GraphCmd  {
             System.out.printf("Total Resolved Nodes: %d, Total Links Persisted: %d\n", totalNodes, totalLinks);
             System.out.println("Graphs persisted to " + new File(cg.cacheGenieRoot(), "graph.db").getAbsolutePath());
             System.exit(0);
-        }
-
-        private MavenMetaData loadMeta(File artifactDir) {
-            File jsonFile = new File(artifactDir, "metadata.json");
-            if (jsonFile.exists()) {
-                return MavenMetaData.loadJSON(jsonFile);
-            }
-            return null;
         }
     }
 
@@ -365,7 +314,7 @@ public class GraphCmd  {
         }
     }
 
-    @CommandLine.Command(name = "stats", description = "Print statistics about the graph database")
+    @CommandLine.Command(name = "stats", description = "Print statistics about the graph and discovery metadata")
     public static class GraphStatsCmd implements Runnable {
 
         @CommandLine.ParentCommand
@@ -380,6 +329,12 @@ public class GraphCmd  {
                 System.out.println("Run 'graph artifact' first to populate the database.");
                 return;
             }
+
+            // A fresh 'scan' creates graph.db with only the meta tables, and
+            // 'graph artifact/cache' creates only the graph tables. Ensure both
+            // schemas exist so stats render regardless of which has run yet.
+            new GraphRepository(cg.cacheGenieRoot());
+            new MetaRepository(cg.cacheGenieRoot());
 
             System.out.println("Graph Database Statistics");
             System.out.println("-------------------------");
@@ -433,6 +388,55 @@ public class GraphCmd  {
                         if (scope == null || scope.isEmpty()) scope = "(none)";
                         System.out.printf("  %-12s: %d\n", scope, rs.getLong(2));
                     }
+                }
+
+                // --- Metadata (discovery) statistics, populated by 'scan' ---
+                System.out.println("\nMetadata Statistics");
+                System.out.println("-------------------");
+
+                long metaArtifacts = 0;
+                try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM meta_artifacts")) {
+                    if (rs.next()) metaArtifacts = rs.getLong(1);
+                }
+                System.out.println("Tracked group:artifacts: " + metaArtifacts);
+
+                long metaVersions = 0;
+                try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM meta_versions")) {
+                    if (rs.next()) metaVersions = rs.getLong(1);
+                }
+                System.out.println("Discovered versions: " + metaVersions);
+
+                try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM meta_versions WHERE missing_pom = TRUE")) {
+                    if (rs.next()) System.out.println("Versions with missing POMs: " + rs.getLong(1));
+                }
+
+                if (metaArtifacts > 0) {
+                    System.out.printf("Average versions per artifact: %.1f%n",
+                            metaVersions / (double) metaArtifacts);
+                }
+
+                System.out.println("\nTop 5 Artifacts by Number of Versions:");
+                String topVersions = "SELECT a.gid, a.aid, COUNT(v.version) as count " +
+                        "FROM meta_artifacts a JOIN meta_versions v ON a.id = v.ga_id " +
+                        "GROUP BY a.gid, a.aid ORDER BY count DESC LIMIT 5";
+                try (ResultSet rs = stmt.executeQuery(topVersions)) {
+                    while (rs.next()) {
+                        System.out.printf("  %s:%s -> %d versions\n", rs.getString(1), rs.getString(2), rs.getLong(3));
+                    }
+                }
+
+                System.out.println("\nTop 5 Artifacts by Missing POMs:");
+                String topMissing = "SELECT a.gid, a.aid, COUNT(*) as count " +
+                        "FROM meta_artifacts a JOIN meta_versions v ON a.id = v.ga_id " +
+                        "WHERE v.missing_pom = TRUE " +
+                        "GROUP BY a.gid, a.aid ORDER BY count DESC LIMIT 5";
+                try (ResultSet rs = stmt.executeQuery(topMissing)) {
+                    boolean any = false;
+                    while (rs.next()) {
+                        any = true;
+                        System.out.printf("  %s:%s -> %d missing\n", rs.getString(1), rs.getString(2), rs.getLong(3));
+                    }
+                    if (!any) System.out.println("  (none)");
                 }
 
             } catch (SQLException e) {

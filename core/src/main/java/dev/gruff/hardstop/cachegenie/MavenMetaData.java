@@ -5,7 +5,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
@@ -68,41 +67,12 @@ public class MavenMetaData {
         updated=toInstant(s);
     }
 
-    public void save(File f) throws IOException {
+    public void setUpdatedInstant(Instant i) {
+        this.updated = i;
+    }
 
-        if(f==null) {
-            log.warn("no file provided for saving meta data");
-            return;
-        }
-
-        Properties p=new Properties();
-        if(uri!=null) p.setProperty("meta.uri",uri.toASCIIString());
-        p.setProperty("meta.gid",gid);
-        p.setProperty("meta.aid",aid);
-        p.setProperty("meta.release",release);
-        p.setProperty("meta.latest",latest);
-        p.setProperty("meta.updated", String.valueOf(updated));
-        List<String> versionNames=new LinkedList<>();
-        versionNames.addAll(versions.keySet());
-        String vlist=String.join(" ",versionNames);
-        p.setProperty("meta.versions",vlist);
-
-        if (!missingPoms.isEmpty()) {
-            p.setProperty("meta.missing.poms", String.join(" ", missingPoms));
-        }
-
-        int c=1;
-        for(String v:versionNames) {
-            p.setProperty("version."+c+".updated", String.valueOf(versions.get(v).updated));
-            c++;
-        }
-
-        p.setProperty("meta.generated",Instant.now().toString());
-        try (FileWriter fw = new FileWriter(f)) {
-            p.store(fw, "" + Instant.now());
-        }
-
-        log.info("saved {}", f.getAbsolutePath());
+    public void setGenerated(Instant i) {
+        this.generated = i;
     }
 
     public String toString() {
@@ -199,18 +169,32 @@ public class MavenMetaData {
     private static String extractJSON(String json, String key) {
         int idx = json.indexOf("\"" + key + "\":");
         if (idx == -1) return null;
-        int start = json.indexOf("\"", idx + key.length() + 3);
-        if (start == -1) {
-            // might be boolean or null
-            int valStart = idx + key.length() + 3;
-            int comma = json.indexOf(",", valStart);
-            if (comma == -1) comma = json.indexOf("}", valStart);
-            if (comma == -1) comma = json.indexOf("\n", valStart);
-            if (comma == -1) return null;
-            return json.substring(valStart, comma).trim();
+        // Position immediately after the colon of "key":
+        int valStart = idx + key.length() + 3;
+        // Skip any whitespace between the colon and the value.
+        while (valStart < json.length() && Character.isWhitespace(json.charAt(valStart))) {
+            valStart++;
         }
-        int end = json.indexOf("\"", start + 1);
-        return json.substring(start + 1, end);
+        if (valStart >= json.length()) return null;
+
+        if (json.charAt(valStart) == '"') {
+            // Quoted string value.
+            int start = valStart + 1;
+            int end = json.indexOf("\"", start);
+            if (end == -1) return null;
+            return json.substring(start, end);
+        }
+
+        // Unquoted literal (null / true / false / number). Read until the next
+        // delimiter. Crucially, do NOT scan forward to the next quote, which
+        // would wrongly grab the following key's name (e.g. returning
+        // "missingPom" for a "published": null value).
+        int end = valStart;
+        while (end < json.length() && ",}]\n\r".indexOf(json.charAt(end)) == -1) {
+            end++;
+        }
+        String val = json.substring(valStart, end).trim();
+        return val.isEmpty() ? null : val;
     }
 
     private static Instant toInstant(String updated) {

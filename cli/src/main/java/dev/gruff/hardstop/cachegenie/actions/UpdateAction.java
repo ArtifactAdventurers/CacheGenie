@@ -2,11 +2,9 @@ package dev.gruff.hardstop.cachegenie.actions;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.MavenMetaData;
+import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
 
-import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedList;
@@ -18,7 +16,7 @@ public class UpdateAction {
         this.cg=cg;
     }
 
-    // updates items listeed in index.
+    // updates items listed in the meta tables.
     public void update(List<String> params) throws IOException {
         int localAge=7;
         int globalAge=365;
@@ -40,40 +38,24 @@ public class UpdateAction {
         Instant globalInstantBoundary=now.minus(globalAge, ChronoUnit.DAYS);
         System.out.println("local boundary "+localInstantBoundary+" files updated on local cache after this date are ignored");
         System.out.println("global  boundary "+globalInstantBoundary+" files last updated on repo before this date are ignored");
-        File f=cg.cacheGenieRoot();
-        System.out.println("root "+f.toPath());
-        Files.list(f.toPath()).filter(p -> { return p.toFile().isFile() && p.toFile().getName().endsWith(".properties");})
-                .map(UpdateAction::toMeta)
-                .forEach(m -> {
-                    Instant updated=m.m.updated();
-                    if(updated==null) {
-                        //  System.out.println(m.f.getAbsolutePath()+"\n\n\n\n no updated");
-                        return;
-                    }
-                    Instant generated=m.m.generated();
-                    if(generated==null) {
-                        //  System.out.println(m.f.getAbsolutePath()+"\n\n\n\n1 no gen");
-                        return;
-                    }
-                    boolean inLocalScope=generated.isBefore(localInstantBoundary);
-                    boolean inGlobalScope=updated.isAfter(globalInstantBoundary);
-                    if(inGlobalScope ) {
-                        System.out.println(m.f.getAbsolutePath() + " updated " + updated + " gen " + generated);
-                        System.out.println("caching latest version");
-                        String ref=m.m.gid+":"+m.m.aid+":"+m.m.latest;
-                        LinkedList<String> l=new LinkedList<>();
-                        l.add(ref);
-                        CacheAction ca=new CacheAction(cg);
-                        ca.cache(l);
-                    }
-                });
-    }
 
-    private record Entry(File f, MavenMetaData m){}
-
-
-    static Entry toMeta(Path f) {
-        File file=f.toFile();
-        return new Entry(file, MavenMetaData.load(file));
+        MetaRepository metaRepo = new MetaRepository(cg.cacheGenieRoot());
+        metaRepo.loadAll().forEach(m -> {
+            Instant updated=m.updated();
+            if(updated==null) return;
+            Instant generated=m.generated();
+            if(generated==null) return;
+            boolean inLocalScope=generated.isBefore(localInstantBoundary);
+            boolean inGlobalScope=updated.isAfter(globalInstantBoundary);
+            if(inGlobalScope ) {
+                System.out.println(m.gid+":"+m.aid + " updated " + updated + " gen " + generated);
+                System.out.println("caching latest version");
+                String ref=m.gid+":"+m.aid+":"+m.latest;
+                LinkedList<String> l=new LinkedList<>();
+                l.add(ref);
+                CacheAction ca=new CacheAction(cg);
+                ca.cache(l);
+            }
+        });
     }
 }

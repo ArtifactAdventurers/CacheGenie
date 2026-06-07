@@ -65,9 +65,14 @@ public class RootCmd  {
                 java.net.URL url = getClass().getResource("/logback.xml");
                 if (url != null) {
                     configurator.doConfigure(url);
+                } else {
+                    // No config on the classpath — don't leave the context with
+                    // zero appenders (which would silence all logging). Fall back
+                    // to a basic console appender at the requested level.
+                    new ch.qos.logback.classic.BasicConfigurator().configure(loggerContext);
                 }
             } catch (ch.qos.logback.core.joran.spi.JoranException e) {
-                // ignore
+                new ch.qos.logback.classic.BasicConfigurator().configure(loggerContext);
             }
         }
     }

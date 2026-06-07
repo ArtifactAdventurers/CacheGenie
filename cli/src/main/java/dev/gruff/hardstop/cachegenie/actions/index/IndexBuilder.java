@@ -3,6 +3,7 @@ package dev.gruff.hardstop.cachegenie.actions.index;
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.MavenMetaData;
 import dev.gruff.hardstop.cachegenie.MavenMetaDataFactory;
+import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
 import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.treestreamer.ContentType;
 import dev.gruff.hardstop.treestreamer.URIHelper;
@@ -29,11 +30,13 @@ public class IndexBuilder {
     CacheGenie genie;
     final NavigatorPolicy policy;
     final MavenMetaDataFactory mb;
+    final MetaRepository metaRepo;
     private final Progress progress = Progress.start("Index", 50, 2000L);
 
     public IndexBuilder(CacheGenie cg) {
         genie = cg;
         mb = MavenMetaDataFactory.newInstance();
+        metaRepo = new MetaRepository(cg.cacheGenieRoot());
 
         policy = builder()
 
@@ -194,42 +197,15 @@ public class IndexBuilder {
         }
         progress.tick(m.gid + ":" + m.aid);
         log.debug("meta link: {}", m.uri);
-        File local = toLocal(m.uri);
-        if (local.exists()) {
-            // log.trace("local exists: {}", local);
-        } else {
-            local.getParentFile().mkdirs();
-            try {
-                m.save(local);
-            } catch (IOException e) {
-                log.error("Failed to save meta: {}", e.getMessage());
-            }
-        }
+        metaRepo.save(m);
     }
-
-    private File toLocal(URI u) {
-        URI rel = genie.base().relativize(u);
-        String relPath = rel.getPath();
-        LinkedList<String> l = new LinkedList<>();
-        l.addAll(List.of(relPath.split("/")));
-        l.removeLast(); // drop name
-        String aid = l.removeLast();
-        String gid = String.join(".", l);
-        return toFile(gid, aid);
-
-    }
-
-    private File toFile(String gid, String aid) {
-        String cacheFile = gid + ":" + aid + ".properties";
-        File c = new File(genie.cacheGenieRoot(), cacheFile);
-        return c;
-    }
-
 
     public MavenMetaData meta(String gid, String aid) {
 
-        File f = toFile(gid, aid);
-        if (f != null && f.isFile() && f.exists()) return MavenMetaData.load(f);
+        if (metaRepo.exists(gid, aid)) {
+            MavenMetaData cached = metaRepo.load(gid, aid);
+            if (cached != null) return cached;
+        }
 
         URI file = URIHelper.subDirURI(genie.base(), gid.replace(".", "/") + "/" + aid);
 

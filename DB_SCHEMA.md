@@ -34,8 +34,46 @@ Stores the directed links between artifacts representing dependency relationship
 **Constraints:**
 - `PRIMARY KEY (parent_id, child_id, scope)`: Ensures unique relationships per scope.
 
+### 3. `meta_artifacts`
+Discovery metadata, one row per group:artifact. Replaces the legacy
+`<gid>:<aid>.properties` / `meta/.../metadata.json` files. Written by `index`
+and read by `meta`, `graph`, `meta-csv`, and `update` via `MetaRepository`.
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `id` | `INTEGER` | Primary key (from `seq_meta_artifact_id`). |
+| `gid` | `VARCHAR` | Maven Group ID. |
+| `aid` | `VARCHAR` | Maven Artifact ID. |
+| `uri` | `VARCHAR` | Source index URI the metadata was discovered from. |
+| `latest` | `VARCHAR` | Latest version reported by Maven metadata. |
+| `release` | `VARCHAR` | Release version reported by Maven metadata. |
+| `updated` | `VARCHAR` | ISO-8601 timestamp of the upstream metadata's last update. |
+| `generated` | `VARCHAR` | ISO-8601 timestamp this record was last written. |
+| `status` | `VARCHAR` | `MavenMetaData.Status` name. |
+
+**Constraints:**
+- `UNIQUE (gid, aid)`: One metadata record per group:artifact.
+
+### 4. `meta_versions`
+One row per discovered version of a `meta_artifacts` row.
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `ga_id` | `INTEGER` | FK to `meta_artifacts.id`. |
+| `version` | `VARCHAR` | Version string. |
+| `published` | `VARCHAR` | ISO-8601 publish timestamp (nullable). |
+| `missing_pom` | `BOOLEAN` | True if the POM was sought but not found upstream. |
+
+**Constraints:**
+- `PRIMARY KEY (ga_id, version)`: One row per version per artifact.
+
+> Timestamps in the meta tables are stored as ISO-8601 strings rather than
+> native `TIMESTAMP` to avoid timezone conversion surprises; they round-trip
+> through `Instant.toString()` / `Instant.parse()`.
+
 ## Sequences
 - `seq_artifact_id`: Used to generate unique IDs for the `artifacts` table.
+- `seq_meta_artifact_id`: Used to generate unique IDs for the `meta_artifacts` table.
 
 ## Querying via CLI
 You can query the database directly using the `graph query` command:

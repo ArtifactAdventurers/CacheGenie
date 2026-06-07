@@ -2,6 +2,7 @@ package dev.gruff.hardstop.cachegenie.actions;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.MavenMetaData;
+import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -9,6 +10,7 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.List;
 
 public class CreateMetaCSVAction {
     private static final Logger log = LoggerFactory.getLogger(CreateMetaCSVAction.class);
@@ -19,11 +21,11 @@ public class CreateMetaCSVAction {
     }
 
     public void create(File outputFile) throws IOException {
-        File cacheGenieRoot = cg.cacheGenieRoot();
-        File[] files = cacheGenieRoot.listFiles((dir, name) -> name.endsWith(".properties"));
+        MetaRepository metaRepo = new MetaRepository(cg.cacheGenieRoot());
+        List<MavenMetaData> metas = metaRepo.loadAll();
 
-        if (files == null || files.length == 0) {
-            log.warn("No meta properties files found in {}", cacheGenieRoot.getAbsolutePath());
+        if (metas.isEmpty()) {
+            log.warn("No meta records found in the DuckDB meta tables");
             return;
         }
 
@@ -31,10 +33,8 @@ public class CreateMetaCSVAction {
         try (PrintWriter pw = new PrintWriter(new FileWriter(outputFile))) {
             pw.println("groupId,artifactId,version,published");
 
-            for (File f : files) {
-                MavenMetaData meta = MavenMetaData.load(f);
+            for (MavenMetaData meta : metas) {
                 if (meta == null || meta.gid == null || meta.aid == null) continue;
-
                 for (MavenMetaData.Version v : meta.versions.values()) {
                     pw.printf("%s,%s,%s,%s%n",
                             meta.gid,
