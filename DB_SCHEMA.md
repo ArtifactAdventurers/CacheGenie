@@ -71,9 +71,28 @@ One row per discovered version of a `meta_artifacts` row.
 > native `TIMESTAMP` to avoid timezone conversion surprises; they round-trip
 > through `Instant.toString()` / `Instant.parse()`.
 
+## Views
+
+Created on demand by `db views` (and ensured by `db export`). They are
+convenience wrappers so `graph query` can use friendly names instead of
+hand-written joins.
+
+| View | Description |
+| :--- | :--- |
+| `gav` | `artifacts` with a single `gid:aid:version` string column. |
+| `dependents` | Every dependency edge flattened to readable coordinates: `dep_*` (the depended-upon artifact), `by_*` (the artifact that depends on it), and `scope`. |
+| `version_ranges` | Per group:artifact `version_count`, `first_published`, `last_published` over `meta_versions` (the successor to the old `range.db` CSV dump). |
+
 ## Sequences
 - `seq_artifact_id`: Used to generate unique IDs for the `artifacts` table.
 - `seq_meta_artifact_id`: Used to generate unique IDs for the `meta_artifacts` table.
+
+## Database management (`db` command)
+
+- `db compact` — `CHECKPOINT` + `VACUUM` to flush the WAL and reclaim space (useful after a large `migrate-meta`).
+- `db optimize` — create secondary indexes (`artifacts(gid,aid)`, `dependencies(child_id)`, `meta_artifacts(gid,aid)`) and `ANALYZE`.
+- `db views` — create the convenience views above.
+- `db export [-f parquet|csv|json] [-o DIR]` — `COPY` each table plus `version_ranges` out for external analysis (default parquet, into `~/.m2/cachegenie/export`).
 
 ## Querying via CLI
 You can query the database directly using the `graph query` command:

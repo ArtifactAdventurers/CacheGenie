@@ -90,11 +90,18 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   DuckDB graph), `stats`.
 - `cache` (`hydrate`, `fill`) — download JARs into the local repository.
 - `compare` — API comparison between artifact versions.
-- `db` — build the DuckDB from indexed info.
-- `meta-csv` — dump all meta properties files to a CSV.
+- `db` — manage the DuckDB graph database. Subcommands: `compact` (CHECKPOINT +
+  VACUUM to reclaim space), `optimize` (secondary indexes on `artifacts(gid,aid)`,
+  `dependencies(child_id)`, `meta_artifacts(gid,aid)` + `ANALYZE`), `views`
+  (create the `gav`, `dependents`, `version_ranges` convenience views), and
+  `export` (`COPY` tables + `version_ranges` to parquet/csv/json via
+  `-f/--format`, `-o/--out`). Implemented in `actions/DBAction.java`. (Replaced
+  the old `.properties`→CSV dumper.)
+- `meta-csv` — dump all discovery metadata to a CSV (reads `MetaRepository`).
 - `analyse` — inspect the cache; subcommands `pom` (analyse local POMs) and
   `meta` (analyse cachegenie meta files).
-- `migrate-meta` — migrate metadata files from `.properties` to `.json`.
+- `migrate-meta` — one-time importer: load legacy `.properties`/`metadata.json`
+  meta files into the DuckDB meta tables. Resumable; `--fresh` clears first.
 - `view` (`web`, `ui`) — launch the browser-based dependency viewer over the
   DuckDB graph. `-a/--address/--host` (default `127.0.0.1`), `-p/--port`
   (default `8080`, `0` = free port), `--no-open` to skip auto-launching a
