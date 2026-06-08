@@ -100,8 +100,6 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
 - `meta-csv` — dump all discovery metadata to a CSV (reads `MetaRepository`).
 - `analyse` — inspect the cache; subcommands `pom` (analyse local POMs) and
   `meta` (analyse cachegenie meta files).
-- `migrate-meta` — one-time importer: load legacy `.properties`/`metadata.json`
-  meta files into the DuckDB meta tables. Resumable; `--fresh` clears first.
 - `view` (`web`, `ui`) — launch the browser-based dependency viewer over the
   DuckDB graph. `-a/--address/--host` (default `127.0.0.1`), `-p/--port`
   (default `8080`, `0` = free port), `--no-open` to skip auto-launching a

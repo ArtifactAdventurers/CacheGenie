@@ -64,20 +64,91 @@ public final class DBAction {
         if (dbMissing()) return;
         long before = dbFile().length();
         try (Connection conn = open(); Statement st = conn.createStatement()) {
+            // CHECKPOINT merges the write-ahead log into the main file and frees
+            // blocks for REUSE. Note: DuckDB does not return freed space to the OS
+            // in place, so the file does not shrink here — it only stops growing
+            // until the freed space is reused. A true shrink needs a full rewrite
+            // to a fresh file (see compactRewrite / 'db compact --rewrite').
             st.execute("CHECKPOINT");
-            st.execute("VACUUM");
         } catch (SQLException e) {
             System.err.println("Compact failed: " + e.getMessage());
             log.error("Compact failed", e);
             return;
         }
         long after = dbFile().length();
-        System.out.printf("Compacted %s%n", dbFile().getAbsolutePath());
+        System.out.printf("Checkpointed %s%n", dbFile().getAbsolutePath());
         System.out.printf("  before: %,d KB%n", before / 1024);
         System.out.printf("  after:  %,d KB%n", after / 1024);
         if (after < before) {
             System.out.printf("  reclaimed %,d KB%n", (before - after) / 1024);
+        } else {
+            System.out.println("  (no change — DuckDB reuses freed blocks rather than shrinking the file in place;");
+            System.out.println("   run 'db compact --rewrite' to rebuild into a smaller fresh file)");
         }
+    }
+
+    /**
+     * True compaction: rebuild the database into a fresh file so the on-disk size
+     * reflects only live data, then atomically swap it in. Unlike {@link #compact},
+     * this can actually shrink the file. Implemented via DuckDB's
+     * {@code COPY FROM DATABASE … TO …}.
+     *
+     * <p>Safety: the rebuild is written to a sibling temp file and only swapped in
+     * if it succeeds; the original is left untouched on any error. A {@code .bak}
+     * copy of the original is kept after a successful swap.
+     */
+    public void compactRewrite() {
+        if (dbMissing()) return;
+        File db = dbFile();
+        File tmp = new File(db.getParentFile(), db.getName() + ".compact");
+        File bak = new File(db.getParentFile(), db.getName() + ".bak");
+        if (tmp.exists() && !tmp.delete()) {
+            System.err.println("Could not remove stale temp file " + tmp.getAbsolutePath());
+            return;
+        }
+        long before = db.length();
+
+        try (Connection conn = open(); Statement st = conn.createStatement()) {
+            st.execute("CHECKPOINT");
+            String source;
+            try (java.sql.ResultSet rs = st.executeQuery("SELECT current_database()")) {
+                rs.next();
+                source = rs.getString(1);
+            }
+            st.execute("ATTACH '" + tmp.getAbsolutePath().replace("'", "''") + "' AS compacted");
+            st.execute("COPY FROM DATABASE \"" + source.replace("\"", "\"\"") + "\" TO compacted");
+            st.execute("DETACH compacted");
+        } catch (SQLException e) {
+            System.err.println("Rewrite failed (original left untouched): " + e.getMessage());
+            log.error("compactRewrite failed", e);
+            tmp.delete();
+            return;
+        }
+
+        if (!tmp.exists() || tmp.length() == 0) {
+            System.err.println("Rewrite produced no output; original left untouched.");
+            tmp.delete();
+            return;
+        }
+
+        // Swap: original -> .bak, temp -> original. Remove the now-stale WAL.
+        try {
+            java.nio.file.Path dbp = db.toPath();
+            java.nio.file.Files.deleteIfExists(new File(db.getAbsolutePath() + ".wal").toPath());
+            java.nio.file.Files.move(dbp, bak.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            java.nio.file.Files.move(tmp.toPath(), dbp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception e) {
+            System.err.println("Swap failed: " + e.getMessage() + " — check " + tmp.getAbsolutePath() + " and " + bak.getAbsolutePath());
+            log.error("compactRewrite swap failed", e);
+            return;
+        }
+
+        long after = db.length();
+        System.out.printf("Rewrote %s%n", db.getAbsolutePath());
+        System.out.printf("  before: %,d KB%n", before / 1024);
+        System.out.printf("  after:  %,d KB%n", after / 1024);
+        System.out.printf("  reclaimed %,d KB%n", Math.max(0, (before - after)) / 1024);
+        System.out.println("  previous file kept at " + bak.getAbsolutePath() + " (delete once verified)");
     }
 
     /**

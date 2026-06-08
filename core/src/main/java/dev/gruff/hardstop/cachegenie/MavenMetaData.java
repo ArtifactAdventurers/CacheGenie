@@ -7,7 +7,6 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.net.URI;
-import java.nio.file.Files;
 import java.time.Instant;
 import java.util.*;
 
@@ -122,79 +121,6 @@ public class MavenMetaData {
         }
 
         return meta;
-    }
-
-    public static MavenMetaData loadJSON(File f) {
-        try {
-            String content = Files.readString(f.toPath());
-            MavenMetaData meta = new MavenMetaData();
-            meta.gid = extractJSON(content, "groupId");
-            meta.aid = extractJSON(content, "artifactId");
-            meta.versions = new TreeMap<>();
-            meta.status = Status.has_properties;
-
-            // Very simplistic JSON parsing for versions
-            int versionsIdx = content.indexOf("\"versions\": [");
-            if (versionsIdx != -1) {
-                int start = versionsIdx + 13;
-                int end = content.lastIndexOf("]");
-                String versionsPart = content.substring(start, end);
-                String[] versionObjects = versionsPart.split("\\},");
-                for (String obj : versionObjects) {
-                    String vVal = extractJSON(obj, "version");
-                    if (vVal != null) {
-                        Version v = new Version();
-                        v.version = vVal;
-                        String published = extractJSON(obj, "published");
-                        if (published != null && !"null".equals(published)) {
-                            try {
-                                v.updated = Instant.parse(published);
-                            } catch (Exception e) {
-                                log.warn("Failed to parse published date '{}' for version {}: {}", published, vVal, e.getMessage());
-                            }
-                        }
-                        meta.versions.put(vVal, v);
-                        String missingPom = extractJSON(obj, "missingPom");
-                        if ("true".equals(missingPom)) meta.markPomAsMissing(vVal);
-                    }
-                }
-            }
-            return meta;
-        } catch (Exception e) {
-            log.error("Failed to load JSON meta {}: {}", f.getAbsolutePath(), e.getMessage());
-            return null;
-        }
-    }
-
-    private static String extractJSON(String json, String key) {
-        int idx = json.indexOf("\"" + key + "\":");
-        if (idx == -1) return null;
-        // Position immediately after the colon of "key":
-        int valStart = idx + key.length() + 3;
-        // Skip any whitespace between the colon and the value.
-        while (valStart < json.length() && Character.isWhitespace(json.charAt(valStart))) {
-            valStart++;
-        }
-        if (valStart >= json.length()) return null;
-
-        if (json.charAt(valStart) == '"') {
-            // Quoted string value.
-            int start = valStart + 1;
-            int end = json.indexOf("\"", start);
-            if (end == -1) return null;
-            return json.substring(start, end);
-        }
-
-        // Unquoted literal (null / true / false / number). Read until the next
-        // delimiter. Crucially, do NOT scan forward to the next quote, which
-        // would wrongly grab the following key's name (e.g. returning
-        // "missingPom" for a "published": null value).
-        int end = valStart;
-        while (end < json.length() && ",}]\n\r".indexOf(json.charAt(end)) == -1) {
-            end++;
-        }
-        String val = json.substring(valStart, end).trim();
-        return val.isEmpty() ? null : val;
     }
 
     private static Instant toInstant(String updated) {

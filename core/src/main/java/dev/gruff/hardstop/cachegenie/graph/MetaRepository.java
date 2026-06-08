@@ -14,9 +14,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Persists CacheGenie discovery metadata ({@link MavenMetaData}) into the same
@@ -24,8 +22,7 @@ import java.util.Set;
  * so meta and graph can be queried together.
  *
  * <p>This replaces the per-group-artifact {@code .properties} / {@code .json}
- * files. The on-disk files remain only as an import source for
- * {@code migrate-meta}.
+ * files; metadata now lives solely in DuckDB.
  *
  * <p>Two tables:
  * <ul>
@@ -83,38 +80,6 @@ public class MetaRepository {
         }
     }
 
-    /**
-     * Load the set of coordinate keys ({@code "gid:aid"}) already imported, so a
-     * migration re-run can skip them instead of redoing the work. A coordinate is
-     * present here only once its (batched) write has committed, so skipping it is
-     * safe after an interrupted run.
-     */
-    public Set<String> loadCoordinateKeys() {
-        Set<String> keys = new HashSet<>();
-        try (Connection conn = getConnection();
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT gid, aid FROM meta_artifacts")) {
-            while (rs.next()) {
-                keys.add(rs.getString(1) + ":" + rs.getString(2));
-            }
-        } catch (SQLException e) {
-            log.error("Failed to load existing meta coordinates", e);
-        }
-        return keys;
-    }
-
-    /** Remove all imported meta rows, for a clean re-import ({@code migrate-meta --fresh}). */
-    public synchronized void truncateMeta() {
-        try (Connection conn = getConnection();
-             Statement st = conn.createStatement()) {
-            st.execute("DELETE FROM meta_versions");
-            st.execute("DELETE FROM meta_artifacts");
-            log.info("Cleared meta_artifacts and meta_versions");
-        } catch (SQLException e) {
-            log.error("Failed to clear meta tables", e);
-        }
-    }
-
     /** Insert or update a group:artifact and replace its full version set. */
     public synchronized void save(MavenMetaData meta) {
         if (meta == null || meta.gid == null || meta.aid == null) {
@@ -132,171 +97,6 @@ public class MetaRepository {
             }
         } catch (SQLException e) {
             log.error("Failed to save meta for {}:{}", meta.gid, meta.aid, e);
-        }
-    }
-
-    /**
-     * Bulk insert/update many records reusing a single connection — far faster
-     * than calling {@link #save} per record, which opens a fresh DuckDB
-     * connection (and re-attaches the database file) each time. Commits in
-     * batches. {@code onEach} (nullable) is invoked after each successful write,
-     * e.g. to tick progress.
-     *
-     * @return the number of records written.
-     */
-    public synchronized int saveAll(java.util.Collection<MavenMetaData> metas,
-                                    java.util.function.Consumer<MavenMetaData> onEach) {
-        if (metas == null || metas.isEmpty()) return 0;
-        int written = 0;
-        try (Connection conn = getConnection()) {
-            conn.setAutoCommit(false);
-            int sinceCommit = 0;
-            for (MavenMetaData meta : metas) {
-                if (meta == null || meta.gid == null || meta.aid == null) continue;
-                try {
-                    writeOne(conn, meta);
-                    written++;
-                    sinceCommit++;
-                    if (sinceCommit >= 200) {
-                        conn.commit();
-                        sinceCommit = 0;
-                    }
-                    if (onEach != null) onEach.accept(meta);
-                } catch (SQLException e) {
-                    log.error("Failed to import meta for {}:{} — skipping", meta.gid, meta.aid, e);
-                    conn.rollback();
-                    sinceCommit = 0;
-                }
-            }
-            conn.commit();
-        } catch (SQLException e) {
-            log.error("Bulk meta import failed", e);
-        }
-        return written;
-    }
-
-    /**
-     * Open a streaming writer that reuses a single connection and commits in
-     * batches. Unlike {@link #saveAll}, the caller feeds records one at a time,
-     * so the source (e.g. hundreds of thousands of on-disk meta files) never has
-     * to be materialised in memory at once. Always use in try-with-resources so
-     * the final commit runs.
-     */
-    public BatchWriter openBatch() throws SQLException {
-        return new BatchWriter();
-    }
-
-    /**
-     * Streaming bulk writer over one connection. Not thread-safe: drive it from a
-     * single thread.
-     *
-     * <p>{@link #write} upserts each record (so writing a coordinate twice — e.g.
-     * the {@code .properties} form then the {@code .json} form — leaves the later
-     * write's data in place, "JSON wins"). {@link #writeNew} is a much faster path
-     * for bulk import of coordinates the caller has already de-duplicated: a single
-     * full-row INSERT plus a plain version batch, with no per-record SELECT, UPDATE,
-     * DELETE or ON CONFLICT. (The old path's per-record UPDATE was the main reason
-     * throughput decayed as the table grew, since a DuckDB UPDATE rewrites rows.)
-     * The INSERT statements are prepared once and reused.
-     */
-    public final class BatchWriter implements AutoCloseable {
-        private static final int COMMIT_EVERY = 2000;
-        private final Connection conn;
-        private final PreparedStatement insArtifact;
-        private final PreparedStatement insVersion;
-        private int sinceCommit = 0;
-        private int written = 0;
-        private int skipped = 0;
-
-        private BatchWriter() throws SQLException {
-            this.conn = getConnection();
-            this.conn.setAutoCommit(false);
-            this.insArtifact = conn.prepareStatement(
-                    "INSERT INTO meta_artifacts (id, gid, aid, uri, latest, release, updated, generated, status) " +
-                    "VALUES (nextval('seq_meta_artifact_id'), ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id");
-            this.insVersion = conn.prepareStatement(
-                    "INSERT INTO meta_versions (ga_id, version, published, missing_pom) VALUES (?, ?, ?, ?)");
-        }
-
-        /** Upsert path (safe for existing coordinates). @return true if written. */
-        public boolean write(MavenMetaData meta) {
-            if (meta == null || meta.gid == null || meta.aid == null) {
-                skipped++;
-                return false;
-            }
-            try {
-                writeOne(conn, meta);
-                return committed();
-            } catch (SQLException e) {
-                return failed(meta, e);
-            }
-        }
-
-        /**
-         * Fast insert path for bulk import. Assumes the coordinate is NEW — the
-         * caller (migration) de-duplicates against what is already in the DB, so a
-         * plain INSERT is safe and far cheaper than the find-or-update upsert.
-         * @return true if written.
-         */
-        public boolean writeNew(MavenMetaData meta) {
-            if (meta == null || meta.gid == null || meta.aid == null) {
-                skipped++;
-                return false;
-            }
-            try {
-                int gaId;
-                insArtifact.setString(1, meta.gid);
-                insArtifact.setString(2, meta.aid);
-                insArtifact.setString(3, meta.uri != null ? meta.uri.toASCIIString() : null);
-                insArtifact.setString(4, meta.latest);
-                insArtifact.setString(5, meta.release);
-                insArtifact.setString(6, meta.updated() != null ? meta.updated().toString() : null);
-                insArtifact.setString(7, Instant.now().toString());
-                insArtifact.setString(8, meta.status != null ? meta.status.name() : null);
-                try (ResultSet rs = insArtifact.executeQuery()) {
-                    rs.next();
-                    gaId = rs.getInt(1);
-                }
-                for (MavenMetaData.Version v : meta.versions.values()) {
-                    insVersion.setInt(1, gaId);
-                    insVersion.setString(2, v.value());
-                    insVersion.setString(3, v.date() != null ? v.date().toString() : null);
-                    insVersion.setBoolean(4, meta.isMissingPom(v.value()));
-                    insVersion.addBatch();
-                }
-                insVersion.executeBatch();
-                return committed();
-            } catch (SQLException e) {
-                return failed(meta, e);
-            }
-        }
-
-        private boolean committed() throws SQLException {
-            written++;
-            if (++sinceCommit >= COMMIT_EVERY) {
-                conn.commit();
-                sinceCommit = 0;
-            }
-            return true;
-        }
-
-        private boolean failed(MavenMetaData meta, SQLException e) {
-            log.error("Failed to import meta for {}:{} — skipping", meta.gid, meta.aid, e);
-            try { conn.rollback(); } catch (SQLException re) { log.error("rollback failed", re); }
-            sinceCommit = 0;
-            skipped++;
-            return false;
-        }
-
-        public int written() { return written; }
-        public int skipped() { return skipped; }
-
-        @Override
-        public void close() {
-            try { conn.commit(); } catch (SQLException e) { log.error("final meta commit failed", e); }
-            try { insArtifact.close(); } catch (SQLException e) { log.error("closing statement failed", e); }
-            try { insVersion.close(); } catch (SQLException e) { log.error("closing statement failed", e); }
-            try { conn.close(); } catch (SQLException e) { log.error("closing meta connection failed", e); }
         }
     }
 

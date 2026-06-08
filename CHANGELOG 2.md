@@ -14,24 +14,17 @@ and this project adheres to Semantic Versioning (https://semver.org/spec/v2.0.0.
 - `graph stats` now reports discovery-metadata statistics (tracked group:artifacts, discovered versions, versions with missing POMs, average versions per artifact, top artifacts by version count and by missing POMs) and ensures both the graph and meta schemas exist so it works after a `scan`-only or `graph`-only run.
 
 ### Changed
-- The `db` command is repurposed from a legacy `.properties`→CSV dumper into a DuckDB management command with subcommands: `compact` (CHECKPOINT + VACUUM to reclaim space), `optimize` (secondary indexes + ANALYZE), `views` (create the `gav`, `dependents`, and `version_ranges` convenience views), and `export` (COPY tables + `version_ranges` to parquet/csv/json). The old per-artifact version date-range dump (`range.db`) is now the `version_ranges` view.
 - `index`, `meta`, `graph` (pattern resolve), `meta-csv`, and `update` now read/write discovery metadata through `MetaRepository` (DuckDB) instead of `.properties`/`.json` files.
 - `migrate-meta` is repurposed as a one-time importer: it loads existing `.properties` and `.json` meta files into the DuckDB meta tables (previously it converted `.properties` to `.json`).
 - Malformed POMs now log a WARN naming the file and are skipped, instead of emitting a raw `[Fatal Error] ...` line to stderr; processing continues. A custom SAX `ErrorHandler` replaces the JAXP default.
 - Routed `CacheAction`'s stray `System.out`/`printStackTrace` output through SLF4J for consistent logging.
 
-- `migrate-meta` is now resumable. It streams records straight into DuckDB (no longer building an in-memory map of every record, which exhausted the heap on large caches with hundreds of thousands of meta files), and skips coordinates already imported so an interrupted run can be restarted without redoing work. For `metadata.json` the coordinate is derived from its Maven-style path, so already-imported files are skipped without being re-read. A new `--fresh` flag clears the meta tables for a full re-import.
-
 ### Fixed
-- `migrate-meta` discarded a leading `null`/literal value when hand-parsing `metadata.json`, so versions with no publish date (e.g. missing-POM versions) read the next key name as their date and logged `Failed to parse published date 'missingPom'`. `extractJSON` now distinguishes quoted strings from unquoted literals.
-- `migrate-meta` hit `Duplicate key ... violates primary key constraint` writing versions, because it deleted and re-inserted the same key within one transaction (a DuckDB ART-index limitation). Version writes now use `INSERT ... ON CONFLICT DO UPDATE`, which also makes re-running the import idempotent.
 - Logging was silent in the shaded jar: `logback.xml` lived only in the pom-packaged reactor root (which ships no jar), so `-l/--log` reset the logger context to zero appenders. `logback.xml` now ships in the `cli` module, and `RootCmd` falls back to a basic console configuration if it is ever absent.
 - `migrate-meta` was extremely slow on large caches because `MetaRepository.save` opened a new DuckDB connection per record. Added `MetaRepository.saveAll`, which reuses a single connection and commits in batches; the importer now uses it and reports progress under `-P`.
 
-### Removed
-- The `migrate-meta` command (and `MigrateMetaAction`), the one-time importer that loaded legacy `.properties`/`metadata.json` files into the DuckDB meta tables. The migration is complete; metadata now lives solely in DuckDB. (The `MetaRepository` bulk-writer and `MavenMetaData.loadJSON` that only served it are now unused.)
-- `CreateDBAction`, the legacy `db` command implementation that read `.properties` files (no longer produced) and dumped CSV `index.db`/`range.db` files. Replaced by `DBAction` and the new `db` subcommands.
-- `MavenMetaData.save(File)`, the only code that wrote a legacy meta file (the `.properties` form). It had no callers — metadata is now written exclusively to the DuckDB meta tables — so nothing in the tool writes `.properties` or `metadata.json` meta files any more; those formats are read-only import sources for `migrate-meta`.
+### Deprecated
+- `MavenMetaData.save(File)` (legacy `.properties` writer) — no production path calls it now that metadata lives in DuckDB.
 
 ## [0.1.0] - 2025-10-11
 

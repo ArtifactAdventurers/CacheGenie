@@ -25,14 +25,23 @@ public class DBCmd implements Runnable {
         spec.commandLine().usage(System.out);
     }
 
-    @CommandLine.Command(name = "compact", description = "Checkpoint and reclaim space (shrinks a bloated file after a large import)")
+    @CommandLine.Command(name = "compact", description = "Checkpoint the DB; --rewrite rebuilds into a fresh, smaller file")
     public static class CompactCmd implements Runnable {
         @CommandLine.ParentCommand
         DBCmd parent;
 
+        @CommandLine.Option(names = "--rewrite",
+                description = "Rebuild the database into a fresh file to actually shrink it (keeps a .bak of the original)")
+        boolean rewrite;
+
         @Override
         public void run() {
-            new DBAction(parent.parent.genie()).compact();
+            DBAction action = new DBAction(parent.parent.genie());
+            if (rewrite) {
+                action.compactRewrite();
+            } else {
+                action.compact();
+            }
             System.exit(0);
         }
     }
