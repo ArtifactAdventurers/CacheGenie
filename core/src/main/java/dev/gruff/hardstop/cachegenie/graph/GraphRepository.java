@@ -1,12 +1,14 @@
 package dev.gruff.hardstop.cachegenie.graph;
 
 import dev.gruff.hardstop.resolver.DependencySet;
+import dev.gruff.hardstop.resolver.Resolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.sql.*;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -115,14 +117,17 @@ public class GraphRepository {
     }
 
     private int getOrInsertArtifact(Connection conn, DependencySet.Node node) throws SQLException {
-        String classifier = node.type != null ? node.type : "";
-        
+        return getOrInsertArtifact(conn, node.gid, node.aid, node.ver, node.type != null ? node.type : "");
+    }
+
+    private int getOrInsertArtifact(Connection conn, String gid, String aid, String version, String classifier) throws SQLException {
+        if (classifier == null) classifier = "";
         // Try to select first
         try (PreparedStatement pstmt = conn.prepareStatement(
                 "SELECT id FROM artifacts WHERE gid = ? AND aid = ? AND version = ? AND classifier = ?")) {
-            pstmt.setString(1, node.gid);
-            pstmt.setString(2, node.aid);
-            pstmt.setString(3, node.ver);
+            pstmt.setString(1, gid);
+            pstmt.setString(2, aid);
+            pstmt.setString(3, version);
             pstmt.setString(4, classifier);
             try (ResultSet rs = pstmt.executeQuery()) {
                 if (rs.next()) {
@@ -134,9 +139,9 @@ public class GraphRepository {
         // Not found, insert
         try (PreparedStatement pstmt = conn.prepareStatement(
                 "INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES (nextval('seq_artifact_id'), ?, ?, ?, ?) RETURNING id")) {
-            pstmt.setString(1, node.gid);
-            pstmt.setString(2, node.aid);
-            pstmt.setString(3, node.ver);
+            pstmt.setString(1, gid);
+            pstmt.setString(2, aid);
+            pstmt.setString(3, version);
             pstmt.setString(4, classifier);
             try (ResultSet rs = pstmt.executeQuery()) {
                 if (rs.next()) {
@@ -145,6 +150,40 @@ public class GraphRepository {
             }
         }
         throw new SQLException("Failed to insert artifact and retrieve ID");
+    }
+
+    /**
+     * Persist the <em>direct</em> dependency edges of one artifact (the direct-edge
+     * graph model). Inserts the parent and each child into {@code artifacts} and the
+     * edges into {@code dependencies}. Transitive trees are computed at query time
+     * with recursive CTEs. {@code INSERT OR IGNORE} makes this idempotent.
+     */
+    public void persistDirect(String gid, String aid, String version, List<Resolver.DirectDep> deps) {
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                int parentId = getOrInsertArtifact(conn, gid, aid, version, "");
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT OR IGNORE INTO dependencies (parent_id, child_id, scope) VALUES (?, ?, ?)")) {
+                    for (Resolver.DirectDep d : deps) {
+                        if (d.gid() == null || d.aid() == null || d.version() == null) continue;
+                        int childId = getOrInsertArtifact(conn, d.gid(), d.aid(), d.version(), "");
+                        if (childId == parentId) continue;
+                        ps.setInt(1, parentId);
+                        ps.setInt(2, childId);
+                        ps.setString(3, d.scope() != null ? d.scope() : "");
+                        ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            }
+        } catch (SQLException e) {
+            log.error("Failed to persist direct deps for {}:{}:{}", gid, aid, version, e);
+        }
     }
 
     public boolean isArtifactPresent(String gid, String aid, String version) {

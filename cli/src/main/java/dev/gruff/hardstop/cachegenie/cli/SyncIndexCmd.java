@@ -17,10 +17,14 @@ public class SyncIndexCmd implements Runnable {
             description = "Ignore local sync state and re-pull the entire index (otherwise resumes incrementally).")
     boolean full;
 
+    @CommandLine.Option(names = "--limit", paramLabel = "<n>",
+            description = "Stop after processing N records (0 = no limit). For quickly smoke-testing the full path. Note: with --limit, local sync state is NOT advanced, so this won't mark you up to date.")
+    long limit = 0;
+
     @Override
     public void run() {
-        log.info("Starting index sync {}", full ? "(--full)" : "(incremental)");
-        new IndexerSyncAction(parent.genie()).sync(full);
+        log.info("Starting index sync {}{}", full ? "(--full)" : "(incremental)", limit > 0 ? " limit=" + limit : "");
+        new IndexerSyncAction(parent.genie()).sync(full, limit);
         System.exit(0);
     }
 }

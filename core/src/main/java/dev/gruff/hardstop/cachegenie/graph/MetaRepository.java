@@ -77,7 +77,22 @@ public class MetaRepository {
                     "version VARCHAR," +
                     "published VARCHAR," +
                     "missing_pom BOOLEAN," +
+                    "packaging VARCHAR," +
+                    "file_extension VARCHAR," +
+                    "file_size BIGINT," +
+                    "sha1 VARCHAR," +
+                    "sha256 VARCHAR," +
+                    "has_sources BOOLEAN," +
+                    "has_javadoc BOOLEAN," +
                     "PRIMARY KEY (ga_id, version))");
+            // Backfill columns on databases created before these were added.
+            for (String col : new String[]{
+                    "packaging VARCHAR", "file_extension VARCHAR", "file_size BIGINT",
+                    "sha1 VARCHAR", "sha256 VARCHAR", "has_sources BOOLEAN", "has_javadoc BOOLEAN"}) {
+                try {
+                    stmt.execute("ALTER TABLE meta_versions ADD COLUMN IF NOT EXISTS " + col);
+                } catch (SQLException ignore) { /* older DuckDB without IF NOT EXISTS: column likely exists */ }
+            }
             log.debug("Meta schema initialised at {}", dbPath);
         } catch (SQLException e) {
             log.error("Failed to initialise meta schema", e);
@@ -222,6 +237,7 @@ public class MetaRepository {
         private final PreparedStatement insArtifact;
         private final PreparedStatement insVersion;
         private final PreparedStatement delVersion;
+        private final PreparedStatement updSummary;
         private final Map<String, Integer> idCache = new HashMap<>();
         private int sinceCommit = 0;
 
@@ -232,9 +248,18 @@ public class MetaRepository {
             insArtifact = conn.prepareStatement(
                     "INSERT INTO meta_artifacts (id, gid, aid) VALUES (nextval('seq_meta_artifact_id'), ?, ?) RETURNING id");
             insVersion = conn.prepareStatement(
-                    "INSERT INTO meta_versions (ga_id, version, published, missing_pom) VALUES (?, ?, ?, false) " +
-                    "ON CONFLICT (ga_id, version) DO NOTHING");
+                    "INSERT INTO meta_versions (ga_id, version, published, missing_pom, packaging, file_extension, " +
+                    "file_size, sha1, sha256, has_sources, has_javadoc) " +
+                    "VALUES (?, ?, ?, false, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (ga_id, version) DO NOTHING");
             delVersion = conn.prepareStatement("DELETE FROM meta_versions WHERE ga_id = ? AND version = ?");
+            // Refresh generated/latest/release for one artifact (latest = newest by publish date).
+            updSummary = conn.prepareStatement(
+                    "UPDATE meta_artifacts SET generated = ?, " +
+                    "latest = (SELECT arg_max(version, published) FROM meta_versions WHERE ga_id = ?), " +
+                    "release = COALESCE(" +
+                    "  (SELECT arg_max(version, published) FILTER (WHERE version NOT LIKE '%-SNAPSHOT') FROM meta_versions WHERE ga_id = ?), " +
+                    "  (SELECT arg_max(version, published) FROM meta_versions WHERE ga_id = ?)) " +
+                    "WHERE id = ?");
         }
 
         // SELECT-then-INSERT (cached): we only INSERT when truly absent, so no
@@ -260,20 +285,46 @@ public class MetaRepository {
             return id;
         }
 
-        /** Insert a version if absent. @return true if a new version row was added. */
-        public boolean addVersion(String gid, String aid, String version, Long fileModifiedMillis) {
+        /** Insert a version (with main-artifact fields) if absent. @return true if a new row was added. */
+        public boolean addVersion(String gid, String aid, String version, Long fileModifiedMillis,
+                                 String packaging, String fileExtension, Long fileSize,
+                                 String sha1, String sha256, Boolean hasSources, Boolean hasJavadoc) {
             if (gid == null || aid == null || version == null) return false;
             try {
                 int gaId = artifactId(gid, aid);
                 insVersion.setInt(1, gaId);
                 insVersion.setString(2, version);
                 insVersion.setString(3, fileModifiedMillis != null ? Instant.ofEpochMilli(fileModifiedMillis).toString() : null);
+                insVersion.setString(4, packaging);
+                insVersion.setString(5, fileExtension);
+                if (fileSize != null) insVersion.setLong(6, fileSize); else insVersion.setNull(6, java.sql.Types.BIGINT);
+                insVersion.setString(7, sha1);
+                insVersion.setString(8, sha256);
+                insVersion.setObject(9, hasSources);
+                insVersion.setObject(10, hasJavadoc);
                 int n = insVersion.executeUpdate();
                 maybeCommit();
                 return n > 0;
             } catch (SQLException e) {
                 log.error("index-sync add {}:{}:{} failed", gid, aid, version, e);
                 return false;
+            }
+        }
+
+        /** Refresh one artifact's generated/latest/release after adding versions. */
+        public void refreshSummary(String gid, String aid) {
+            if (gid == null || aid == null) return;
+            try {
+                int gaId = artifactId(gid, aid);
+                updSummary.setString(1, Instant.now().toString());
+                updSummary.setInt(2, gaId);
+                updSummary.setInt(3, gaId);
+                updSummary.setInt(4, gaId);
+                updSummary.setInt(5, gaId);
+                updSummary.executeUpdate();
+                maybeCommit();
+            } catch (SQLException e) {
+                log.error("index-sync summary refresh {}:{} failed", gid, aid, e);
             }
         }
 
@@ -301,10 +352,137 @@ public class MetaRepository {
         @Override
         public void close() {
             try { conn.commit(); } catch (SQLException e) { log.error("final index-sync commit failed", e); }
-            for (PreparedStatement ps : new PreparedStatement[]{selArtifact, insArtifact, insVersion, delVersion}) {
+            for (PreparedStatement ps : new PreparedStatement[]{selArtifact, insArtifact, insVersion, delVersion, updSummary}) {
                 try { if (ps != null) ps.close(); } catch (SQLException ignore) { /* ignore */ }
             }
             try { conn.close(); } catch (SQLException e) { log.error("closing index-sync connection failed", e); }
+        }
+    }
+
+    /**
+     * Open a bulk loader for the FULL index bootstrap. Records (in the ~100M range,
+     * mostly duplicate file-records) are appended to a constraint-free staging
+     * table via DuckDB's {@code Appender}, then merged set-based: collapsed to
+     * distinct versions once, new artifacts bulk-created, versions bulk-inserted.
+     * This avoids the ~100M per-row {@code ON CONFLICT} index probes that made the
+     * row-by-row path take a day. Use only for full pulls (incremental updates,
+     * which also carry removals, use {@link IndexSyncWriter}).
+     *
+     * <p>Note: the staging table lives in {@code graph.db} and so grows the file
+     * for the duration; run {@code db compact --rewrite} afterwards to reclaim it.
+     */
+    public IndexStageLoader openIndexStage() throws SQLException {
+        return new IndexStageLoader();
+    }
+
+    /** Bulk staging loader; see {@link #openIndexStage()}. Not thread-safe. */
+    public final class IndexStageLoader implements AutoCloseable {
+        private final Connection conn;
+        private final org.duckdb.DuckDBAppender appender;
+        private boolean appenderClosed = false;
+
+        private IndexStageLoader() throws SQLException {
+            conn = getConnection();
+            try (Statement st = conn.createStatement()) {
+                st.execute("DROP TABLE IF EXISTS idx_stage");
+                st.execute("CREATE TABLE idx_stage (" +
+                        "gid VARCHAR, aid VARCHAR, version VARCHAR, packaging VARCHAR, " +
+                        "file_extension VARCHAR, file_size BIGINT, sha1 VARCHAR, sha256 VARCHAR, " +
+                        "has_sources BOOLEAN, has_javadoc BOOLEAN, published VARCHAR)");
+            }
+            org.duckdb.DuckDBConnection duck = conn.unwrap(org.duckdb.DuckDBConnection.class);
+            appender = duck.createAppender("main", "idx_stage");
+        }
+
+        /**
+         * Append one (main-artifact) record. Caller should only pass records with an
+         * empty classifier — the main jar/pom. Null strings are stored as ""
+         * (normalised back to NULL in {@link #merge()}); a null size becomes 0.
+         */
+        public void append(String gid, String aid, String version, String packaging, String fileExtension,
+                           Long fileSize, String sha1, String sha256, Boolean hasSources, Boolean hasJavadoc,
+                           Long publishedMillis) throws SQLException {
+            appender.beginRow();
+            appender.append(gid);
+            appender.append(aid);
+            appender.append(version);
+            appender.append(packaging != null ? packaging : "");
+            appender.append(fileExtension != null ? fileExtension : "");
+            appender.append(fileSize != null ? fileSize.longValue() : 0L);
+            appender.append(sha1 != null ? sha1 : "");
+            appender.append(sha256 != null ? sha256 : "");
+            appender.append(hasSources != null && hasSources);
+            appender.append(hasJavadoc != null && hasJavadoc);
+            appender.append(publishedMillis != null ? Instant.ofEpochMilli(publishedMillis).toString() : "");
+            appender.endRow();
+        }
+
+        /**
+         * Flush staging and merge into the meta tables, then drop staging. For each
+         * (gid,aid,version) the representative file is the largest staged record (the
+         * main jar over its pom), and its fields populate the version row.
+         * @return {@code [newArtifacts, newVersions]}.
+         */
+        public long[] merge() throws SQLException {
+            if (!appenderClosed) {
+                appender.close();
+                appenderClosed = true;
+            }
+            long newArtifacts;
+            long newVersions;
+            try (Statement st = conn.createStatement()) {
+                // Bulk-create artifacts not already present.
+                newArtifacts = st.executeUpdate(
+                        "INSERT INTO meta_artifacts (id, gid, aid) " +
+                        "SELECT nextval('seq_meta_artifact_id'), s.gid, s.aid " +
+                        "FROM (SELECT DISTINCT gid, aid FROM idx_stage) s " +
+                        "WHERE NOT EXISTS (SELECT 1 FROM meta_artifacts a WHERE a.gid = s.gid AND a.aid = s.aid)");
+                // Pick one representative file per version (largest = main artifact), bulk-insert new ones.
+                newVersions = st.executeUpdate(
+                        "INSERT INTO meta_versions (ga_id, version, published, missing_pom, packaging, " +
+                        "file_extension, file_size, sha1, sha256, has_sources, has_javadoc) " +
+                        "SELECT a.id, m.version, NULLIF(m.published, ''), false, NULLIF(m.packaging, ''), " +
+                        "NULLIF(m.file_extension, ''), m.file_size, NULLIF(m.sha1, ''), NULLIF(m.sha256, ''), " +
+                        "m.has_sources, m.has_javadoc FROM (" +
+                        "  SELECT gid, aid, version, packaging, file_extension, file_size, sha1, sha256, " +
+                        "  has_sources, has_javadoc, published, " +
+                        "  ROW_NUMBER() OVER (PARTITION BY gid, aid, version ORDER BY file_size DESC NULLS LAST) AS rn " +
+                        "  FROM idx_stage" +
+                        ") m JOIN meta_artifacts a ON a.gid = m.gid AND a.aid = m.aid " +
+                        "WHERE m.rn = 1 " +
+                        "ON CONFLICT (ga_id, version) DO NOTHING");
+                // Refresh artifact-level summary (generated/latest/release) for the
+                // artifacts in this sync. latest = version with the most recent
+                // publish date (Maven's "last deployed" semantics); release = same
+                // excluding -SNAPSHOT. Scoped to staged coordinates.
+                st.execute(
+                        "UPDATE meta_artifacts AS a SET " +
+                        "generated = '" + Instant.now() + "', " +
+                        "latest = sub.latest, " +
+                        "release = COALESCE(sub.release, sub.latest) " +
+                        "FROM (" +
+                        "  SELECT v.ga_id AS ga_id, " +
+                        "         arg_max(v.version, v.published) AS latest, " +
+                        "         arg_max(v.version, v.published) FILTER (WHERE v.version NOT LIKE '%-SNAPSHOT') AS release " +
+                        "  FROM meta_versions v " +
+                        "  WHERE v.ga_id IN (" +
+                        "    SELECT a2.id FROM meta_artifacts a2 " +
+                        "    JOIN (SELECT DISTINCT gid, aid FROM idx_stage) s ON a2.gid = s.gid AND a2.aid = s.aid" +
+                        "  ) GROUP BY v.ga_id" +
+                        ") AS sub WHERE a.id = sub.ga_id");
+                st.execute("DROP TABLE IF EXISTS idx_stage");
+                st.execute("CHECKPOINT");
+            }
+            return new long[]{newArtifacts, newVersions};
+        }
+
+        @Override
+        public void close() {
+            if (!appenderClosed) {
+                try { appender.close(); } catch (Exception ignore) { /* ignore */ }
+                appenderClosed = true;
+            }
+            try { conn.close(); } catch (SQLException e) { log.error("closing index-stage connection failed", e); }
         }
     }
 

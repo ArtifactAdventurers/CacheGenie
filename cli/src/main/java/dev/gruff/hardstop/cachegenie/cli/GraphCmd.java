@@ -23,7 +23,7 @@ import java.util.Set;
 import java.sql.*;
 
 
-@CommandLine.Command(name = "graph", aliases = {"map"}, description = "Produce graph of artifact dependencies ", subcommands = {GraphCmd.GraphCacheCmd.class, GraphCmd.GraphArtifact.class, GraphCmd.GraphQueryCmd.class, GraphCmd.GraphStatsCmd.class})
+@CommandLine.Command(name = "graph", aliases = {"map"}, description = "Produce graph of artifact dependencies ", subcommands = {GraphCmd.GraphCacheCmd.class, GraphCmd.GraphArtifact.class, GraphDepsCmd.class, GraphCmd.GraphQueryCmd.class, GraphCmd.GraphStatsCmd.class})
 public class GraphCmd  {
     private static final Logger log = LoggerFactory.getLogger(GraphCmd.class);
 
@@ -270,6 +270,11 @@ public class GraphCmd  {
                 System.out.println("Run 'graph artifact' first to populate the database.");
                 return;
             }
+
+            // Ensure both schemas (incl. any column migrations) exist so an ad-hoc
+            // query doesn't trip on a DB created before a column was added.
+            new GraphRepository(cg.cacheGenieRoot());
+            new MetaRepository(cg.cacheGenieRoot());
 
             log.debug("Executing query: {}", query);
             try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath());

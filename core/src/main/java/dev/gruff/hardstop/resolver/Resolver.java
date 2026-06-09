@@ -18,6 +18,9 @@ import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.impl.DefaultServiceLocator;
 import org.eclipse.aether.repository.LocalRepository;
 import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.resolution.ArtifactDescriptorException;
+import org.eclipse.aether.resolution.ArtifactDescriptorRequest;
+import org.eclipse.aether.resolution.ArtifactDescriptorResult;
 import org.eclipse.aether.resolution.ArtifactRequest;
 import org.eclipse.aether.resolution.ArtifactResult;
 import org.eclipse.aether.resolution.DependencyRequest;
@@ -155,6 +158,40 @@ public class Resolver {
         } catch (ArtifactResolutionException e) {
             log.info(e.getMessage());
             return false;
+        }
+    }
+
+    /** A single direct dependency edge with its effective version and scope. */
+    public record DirectDep(String gid, String aid, String version, String scope) {}
+
+    /**
+     * Read an artifact's <em>direct</em> dependencies from its effective POM
+     * (parent inheritance, imported BOMs and properties applied, managed versions
+     * resolved) WITHOUT collecting the transitive tree. This is the cheap building
+     * block for an ecosystem-wide graph: one descriptor read per artifact, with the
+     * transitive closure computed later in SQL (recursive CTE).
+     *
+     * @return the direct dependencies, or {@code null} if the descriptor could not be read.
+     */
+    public List<DirectDep> directDependencies(String gav) {
+        session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
+        try {
+            Artifact artifact = new DefaultArtifact(gav);
+            ArtifactDescriptorRequest request = new ArtifactDescriptorRequest(artifact, rrlist, null);
+            ArtifactDescriptorResult result = system.readArtifactDescriptor(session, request);
+            List<DirectDep> out = new LinkedList<>();
+            for (Dependency d : result.getDependencies()) {
+                Artifact da = d.getArtifact();
+                if (da == null) continue;
+                out.add(new DirectDep(da.getGroupId(), da.getArtifactId(), da.getVersion(), d.getScope()));
+            }
+            return out;
+        } catch (ArtifactDescriptorException e) {
+            // Expected for some catalogue entries (internal/test modules, or POMs
+            // whose parent/BOM isn't independently resolvable from the remote). The
+            // caller counts these; keep it quiet so they don't drown the output.
+            log.debug("Failed to read descriptor for {}: {}", gav, e.getMessage());
+            return null;
         }
     }
 

@@ -4,6 +4,7 @@ import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.entities.ArtifactRef;
 import dev.gruff.hardstop.cachegenie.entities.POM;
 import dev.gruff.hardstop.cachegenie.entities.POMStatus;
+import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
 import dev.gruff.hardstop.cachegenie.utils.Progress;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,9 +16,13 @@ import java.nio.file.Path;
 import java.nio.file.FileVisitResult;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Stream;
 
 public class AnalyseAction {
     private static final Logger log = LoggerFactory.getLogger(AnalyseAction.class);
@@ -135,16 +140,41 @@ public class AnalyseAction {
     }
 
     public void analyseMeta() {
-        File cacheGenieRoot = cg.cacheGenieRoot();
-        log.info("Analysing meta properties files in {}", cacheGenieRoot.getAbsolutePath());
-        if (!cacheGenieRoot.exists() || !cacheGenieRoot.isDirectory()) {
-            log.warn("CacheGenie root not found at {}", cacheGenieRoot.getAbsolutePath());
+        File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
+        if (!dbFile.exists()) {
+            System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
+            System.out.println("Run 'index-sync' or 'scan' first to populate discovery metadata.");
             return;
         }
+        // Ensure the meta schema exists (also migrates older DBs).
+        new MetaRepository(cg.cacheGenieRoot());
 
-        long count = countFiles(cacheGenieRoot, ".properties");
-        log.info("Found {} meta properties files.", count);
-        System.out.println("Total meta properties files: " + count);
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath());
+             Statement st = conn.createStatement()) {
+            long artifacts = scalar(st, "SELECT COUNT(*) FROM meta_artifacts");
+            long versions = scalar(st, "SELECT COUNT(*) FROM meta_versions");
+            long missing = scalar(st, "SELECT COUNT(*) FROM meta_versions WHERE missing_pom = TRUE");
+            long published = scalar(st, "SELECT COUNT(*) FROM meta_versions WHERE published IS NOT NULL");
+
+            System.out.println("--- Discovery Metadata (DuckDB) ---");
+            System.out.println("Location: " + dbFile.getAbsolutePath());
+            System.out.println("Tracked group:artifacts: " + artifacts);
+            System.out.println("Discovered versions: " + versions);
+            System.out.println("Versions with missing POMs: " + missing);
+            System.out.println("Versions with a publish date: " + published);
+            if (artifacts > 0) {
+                System.out.printf("Average versions per artifact: %.1f%n", versions / (double) artifacts);
+            }
+        } catch (SQLException e) {
+            log.error("Failed to read discovery metadata", e);
+            System.err.println("Failed to read discovery metadata: " + e.getMessage());
+        }
+    }
+
+    private static long scalar(Statement st, String sql) throws SQLException {
+        try (ResultSet rs = st.executeQuery(sql)) {
+            return rs.next() ? rs.getLong(1) : 0L;
+        }
     }
 
     public void countPomsOnly() {

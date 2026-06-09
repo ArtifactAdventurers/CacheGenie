@@ -6,14 +6,42 @@ CacheGenie uses a local [DuckDB](https://duckdb.org/) database to persist artifa
 The database file is located at:
 `~/.m2/cachegenie/graph.db`
 
+## Where the data comes from
+
+There are two independent pipelines that fill this database, and the tables
+split along that line:
+
+- **Discovery metadata** (`meta_artifacts`, `meta_versions`) — *what exists* in
+  the remote repository. Two sources write it, both through `MetaRepository`:
+  - **`index-sync`** reads the repository's published Maven index
+    (maven-indexer format) and is the bulk/primary source. It populates the
+    coordinates and the per-version *file facts* (size, checksums, packaging,
+    sources/javadoc flags, publish date), stamps `generated`, and derives
+    `latest`/`release` (the newest version by publish date).
+  - **`scan`/`index`** crawls HTML directory listings and parses each
+    `maven-metadata.xml`, so it is the only source for `uri`, `updated`, and
+    `status` (and also sets `latest`/`release`/`generated`).
+  - **`meta`/`fetch`** downloads POM files and sets `missing_pom` when a POM is
+    absent upstream.
+- **Dependency graph** (`artifacts`, `dependencies`) — *how things relate*.
+  Populated by `graph artifact` / `graph cache`, which resolve POMs with Maven
+  Resolver (Aether) and persist the resulting nodes and edges via
+  `GraphRepository`. This data comes from the POM `<dependencies>` — it is **not**
+  in the index, which is why `index-sync` alone can't build the graph.
+
+The "Source" column in each table below names the command(s) that write each
+field. A field can be null simply because the pipeline that fills it hasn't run
+for that row (e.g. an artifact known only from `index-sync` has no `latest`,
+because only the HTML `scan` parses `maven-metadata.xml`).
+
 ## Tables
 
 ### 1. `artifacts`
-Maps Maven coordinates (GAV) to unique integer IDs to save space and improve query performance.
+Maps Maven coordinates (GAV) to unique integer IDs. **Populated by** `graph artifact` / `graph cache` (every node in a resolved dependency graph), via `GraphRepository`.
 
 | Column | Type | Description |
 | :--- | :--- | :--- |
-| `id` | `INTEGER` | Primary Key. Unique identifier for the artifact. |
+| `id` | `INTEGER` | Primary Key (from `seq_artifact_id`). |
 | `gid` | `VARCHAR` | Maven Group ID (e.g., `org.slf4j`). |
 | `aid` | `VARCHAR` | Maven Artifact ID (e.g., `slf4j-api`). |
 | `version` | `VARCHAR` | Version string (e.g., `2.0.9`). |
@@ -23,7 +51,7 @@ Maps Maven coordinates (GAV) to unique integer IDs to save space and improve que
 - `UNIQUE (gid, aid, version, classifier)`: Ensures no duplicate GAV entries.
 
 ### 2. `dependencies`
-Stores the directed links between artifacts representing dependency relationships.
+Directed dependency edges. **Populated by** `graph artifact` / `graph cache` from the resolved POM `<dependencies>` (Maven Resolver / Aether).
 
 | Column | Type | Description |
 | :--- | :--- | :--- |
@@ -35,21 +63,25 @@ Stores the directed links between artifacts representing dependency relationship
 - `PRIMARY KEY (parent_id, child_id, scope)`: Ensures unique relationships per scope.
 
 ### 3. `meta_artifacts`
-Discovery metadata, one row per group:artifact. Replaces the legacy
-`<gid>:<aid>.properties` / `meta/.../metadata.json` files. Written by `index`
-and read by `meta`, `graph`, `meta-csv`, and `update` via `MetaRepository`.
+Discovery metadata, one row per group:artifact. (Replaces the legacy
+`<gid>:<aid>.properties` / `meta/.../metadata.json` files; nothing on disk now.)
 
-| Column | Type | Description |
-| :--- | :--- | :--- |
-| `id` | `INTEGER` | Primary key (from `seq_meta_artifact_id`). |
-| `gid` | `VARCHAR` | Maven Group ID. |
-| `aid` | `VARCHAR` | Maven Artifact ID. |
-| `uri` | `VARCHAR` | Source index URI the metadata was discovered from. |
-| `latest` | `VARCHAR` | Latest version reported by Maven metadata. |
-| `release` | `VARCHAR` | Release version reported by Maven metadata. |
-| `updated` | `VARCHAR` | ISO-8601 timestamp of the upstream metadata's last update. |
-| `generated` | `VARCHAR` | ISO-8601 timestamp this record was last written. |
-| `status` | `VARCHAR` | `MavenMetaData.Status` name. |
+| Column | Type | Source | Description |
+| :--- | :--- | :--- | :--- |
+| `id` | `INTEGER` | scan / index-sync | Primary key (from `seq_meta_artifact_id`). |
+| `gid` | `VARCHAR` | scan / index-sync | Maven Group ID. |
+| `aid` | `VARCHAR` | scan / index-sync | Maven Artifact ID. |
+| `uri` | `VARCHAR` | **scan** | Source index URI the metadata was discovered from (crawl only). |
+| `latest` | `VARCHAR` | scan / index-sync | scan: `<latest>` from `maven-metadata.xml`. index-sync: newest version by publish date. |
+| `release` | `VARCHAR` | scan / index-sync | scan: `<release>`. index-sync: newest non-`-SNAPSHOT` version by publish date. |
+| `updated` | `VARCHAR` | **scan** | `<lastUpdated>` from `maven-metadata.xml` (ISO-8601). |
+| `generated` | `VARCHAR` | scan / index-sync | ISO-8601 timestamp this row was last written/refreshed; also read by scan's `--max-age` freshness gate. |
+| `status` | `VARCHAR` | **scan** | `MavenMetaData.Status` name. |
+
+> `index-sync` sets `id`/`gid`/`aid`, `generated`, and the derived
+> `latest`/`release`. `uri`, `updated`, and `status` come only from the HTML
+> `scan` (which parses `maven-metadata.xml`), so they are null for an artifact
+> known only from `index-sync` until a `scan` covers it.
 
 **Constraints:**
 - `UNIQUE (gid, aid)`: One metadata record per group:artifact.
@@ -57,12 +89,25 @@ and read by `meta`, `graph`, `meta-csv`, and `update` via `MetaRepository`.
 ### 4. `meta_versions`
 One row per discovered version of a `meta_artifacts` row.
 
-| Column | Type | Description |
-| :--- | :--- | :--- |
-| `ga_id` | `INTEGER` | FK to `meta_artifacts.id`. |
-| `version` | `VARCHAR` | Version string. |
-| `published` | `VARCHAR` | ISO-8601 publish timestamp (nullable). |
-| `missing_pom` | `BOOLEAN` | True if the POM was sought but not found upstream. |
+| Column | Type | Source | Description |
+| :--- | :--- | :--- | :--- |
+| `ga_id` | `INTEGER` | scan / index-sync | FK to `meta_artifacts.id`. |
+| `version` | `VARCHAR` | scan / index-sync | Version string. |
+| `published` | `VARCHAR` | **index-sync** (`FILE_MODIFIED`) | ISO-8601 publish timestamp. Usually null from `scan` (`maven-metadata.xml` has no per-version date). |
+| `missing_pom` | `BOOLEAN` | **fetch** | True once `fetch`/`meta` tries the POM and it is absent upstream; false otherwise. |
+| `packaging` | `VARCHAR` | **index-sync** | Maven packaging of the main artifact (`jar`, `pom`, `war`, …). |
+| `file_extension` | `VARCHAR` | **index-sync** | Extension of the main artifact file. |
+| `file_size` | `BIGINT` | **index-sync** | Size in bytes of the main artifact file. |
+| `sha1` | `VARCHAR` | **index-sync** | SHA-1 of the main artifact file. |
+| `sha256` | `VARCHAR` | **index-sync** | SHA-256 of the main artifact file (null for older index entries). |
+| `has_sources` | `BOOLEAN` | **index-sync** | A `-sources` jar exists for this version. |
+| `has_javadoc` | `BOOLEAN` | **index-sync** | A `-javadoc` jar exists for this version. |
+
+The seven file-fact columns come from the published index, per version using its
+*main* artifact — the largest file among the version's classifier-less records
+(the main jar over its pom). Per-classifier (sources/javadoc/pom) checksums are
+not stored. These columns are null for versions discovered only via the HTML
+`scan`/`fetch` path.
 
 **Constraints:**
 - `PRIMARY KEY (ga_id, version)`: One row per version per artifact.
@@ -89,7 +134,7 @@ hand-written joins.
 
 ## Database management (`db` command)
 
-- `db compact` — `CHECKPOINT` + `VACUUM` to flush the WAL and reclaim space (useful after a large `migrate-meta`).
+- `db compact` — `CHECKPOINT` to flush the WAL (does not shrink the file in place); `db compact --rewrite` rebuilds into a fresh, smaller file (keeps a `.bak`). Useful after a large `index-sync --full`, whose staging table inflates the file.
 - `db optimize` — create secondary indexes (`artifacts(gid,aid)`, `dependencies(child_id)`, `meta_artifacts(gid,aid)`) and `ANALYZE`.
 - `db views` — create the convenience views above.
 - `db export [-f parquet|csv|json] [-o DIR]` — `COPY` each table plus `version_ranges` out for external analysis (default parquet, into `~/.m2/cachegenie/export`).

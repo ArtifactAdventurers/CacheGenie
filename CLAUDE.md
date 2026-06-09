@@ -104,14 +104,29 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   repository's **published Maven index** (maven-indexer format) instead of
   crawling HTML. First run pulls the full index; later runs pull only incremental
   chunks. `--full` ignores local state and re-pulls everything. Local sync state
-  lives in `~/.m2/cachegenie/work/indexer`. Uses `org.apache.maven.indexer:indexer-reader`;
-  `IndexerSyncAction` streams records into the meta tables via
-  `MetaRepository.IndexSyncWriter`. `HttpResourceHandler`/`FileWritableResourceHandler`
-  (in `actions/index`) are the remote/local `ResourceHandler`s. Far fewer requests
-  than `scan`; `scan` remains for targeted `--gav` lookups and immediacy.
+  lives in `~/.m2/cachegenie/work/indexer`. Uses `org.apache.maven.indexer:indexer-reader`.
+  `IndexerSyncAction` branches on `reader.isIncremental()`: a **full** pull bulk-loads
+  every ADD record into a staging table via DuckDB's Appender then merges set-based
+  (`MetaRepository.IndexStageLoader` — collapses ~100M file-records to distinct
+  versions once, builds the index once; the earlier per-row path took ~24h);
+  **incremental** pulls apply the small diff row-by-row via
+  `MetaRepository.IndexSyncWriter` (honouring ARTIFACT_REMOVE).
+  `HttpResourceHandler`/`FileWritableResourceHandler` (in `actions/index`) are the
+  remote/local `ResourceHandler`s. The full load grows `graph.db` with the staging
+  table (run `db compact --rewrite` after). `--limit <n>` stops after N records and
+  does NOT persist sync state (smoke-test the full path quickly; pair with
+  `-c <scratch>`). Far fewer requests than `scan`; `scan` remains for targeted
+  `--gav` lookups and immediacy.
 - `meta` (`fetch`) — download missing POMs for indexed versions.
-- `graph` (`map`) — subcommands: `artifact`, `cache`, `query` (SQL against the
-  DuckDB graph), `stats`.
+- `graph` (`map`) — subcommands: `artifact`, `cache`, `deps`, `query` (SQL
+  against the DuckDB graph), `stats`. `deps` (`GraphDepsCmd`) builds the
+  **direct**-edge graph for targeted `--gav` selectors driven from the meta
+  catalogue: per version it reads the effective direct dependencies via
+  `Resolver.directDependencies` (Aether `readArtifactDescriptor` — no transitive
+  collection) and persists edges via `GraphRepository.persistDirect`; transitive
+  trees are then recursive-CTE queries. Skips already-graphed versions and
+  `missing_pom` ones. Sequential. (`artifact`/`cache` still use the older Aether
+  transitive `resolveGraph`/`persist` path.)
 - `cache` (`hydrate`, `fill`) — download JARs into the local repository.
 - `compare` — API comparison between artifact versions.
 - `db` — manage the DuckDB graph database. Subcommands: `compact` (CHECKPOINT +
@@ -122,8 +137,9 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   `-f/--format`, `-o/--out`). Implemented in `actions/DBAction.java`. (Replaced
   the old `.properties`→CSV dumper.)
 - `meta-csv` — dump all discovery metadata to a CSV (reads `MetaRepository`).
-- `analyse` — inspect the cache; subcommands `pom` (analyse local POMs) and
-  `meta` (analyse cachegenie meta files).
+- `analyse` — inspect the cache; subcommands `pom` (analyse local POMs in
+  `~/.m2/repository`) and `meta` (report discovery-metadata counts from the
+  DuckDB meta tables — no longer reads on-disk `.properties`).
 - `view` (`web`, `ui`) — launch the browser-based dependency viewer over the
   DuckDB graph. `-a/--address/--host` (default `127.0.0.1`), `-p/--port`
   (default `8080`, `0` = free port), `--no-open` to skip auto-launching a
