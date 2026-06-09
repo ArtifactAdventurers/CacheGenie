@@ -19,13 +19,25 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.*;
+import java.util.function.Predicate;
 
 public final class MavenStyleHTMLRefNavigator implements LinkReader {
 
     private final MavenMetaDataFactory mb;
+    /**
+     * Optional gate consulted with the {@code maven-metadata.xml} URI BEFORE it is
+     * fetched: returning false means "skip" — don't download/parse it and don't
+     * descend further (used by the scan freshness heuristic). Null = always fetch.
+     */
+    private final Predicate<URI> shouldFetchMeta;
 
     public MavenStyleHTMLRefNavigator(MavenMetaDataFactory mb) {
+        this(mb, null);
+    }
+
+    public MavenStyleHTMLRefNavigator(MavenMetaDataFactory mb, Predicate<URI> shouldFetchMeta) {
         this.mb=mb;
+        this.shouldFetchMeta=shouldFetchMeta;
     }
 
     @Override
@@ -68,6 +80,11 @@ public final class MavenStyleHTMLRefNavigator implements LinkReader {
 
         Link m=contents.get("maven-metadata.xml");
         if(m!=null) {
+           // Freshness gate: if we're told to skip this artifact, don't fetch the
+           // metadata and don't descend (return an empty set, which is terminal).
+           if (shouldFetchMeta != null && !shouldFetchMeta.test(m.path())) {
+               return new LinkSetImpl();
+           }
            MavenMetaData meta= toMeta(m,contents);
            if(meta!=null) return meta;
         }

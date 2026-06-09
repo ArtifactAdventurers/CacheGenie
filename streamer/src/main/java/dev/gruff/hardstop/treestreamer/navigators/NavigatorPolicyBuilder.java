@@ -3,6 +3,7 @@ package dev.gruff.hardstop.treestreamer.navigators;
 
 import dev.gruff.hardstop.treestreamer.ContentType;
 import dev.gruff.hardstop.treestreamer.LinkReader;
+import dev.gruff.hardstop.treestreamer.RateLimiter;
 
 import java.time.Duration;
 import java.util.function.Function;
@@ -43,6 +44,12 @@ public class NavigatorPolicyBuilder {
 
     public NavigatorPolicyBuilder rateLimit(int count, Duration d) {
         policy.rateLimit(count,d);
+        return this;
+    }
+
+    /** Use a shared limiter so several policies enforce one aggregate budget. */
+    public NavigatorPolicyBuilder rateLimit(RateLimiter shared) {
+        policy.rateLimit(shared);
         return this;
     }
 

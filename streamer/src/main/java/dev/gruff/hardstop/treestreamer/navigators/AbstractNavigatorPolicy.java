@@ -34,6 +34,11 @@ public abstract sealed class AbstractNavigatorPolicy implements NavigatorPolicy 
         this.rateLimiter=new RateLimiter(c,d);
     }
 
+    /** Share an existing limiter across policies (e.g. one aggregate budget for a parallel crawl). */
+    public void rateLimit(RateLimiter shared) {
+        this.rateLimiter=shared;
+    }
+
     public RateLimiter rateLimiter() {
         if(rateLimiter==null) return new RateLimiter(6, Duration.ofMinutes(1));
         return rateLimiter;

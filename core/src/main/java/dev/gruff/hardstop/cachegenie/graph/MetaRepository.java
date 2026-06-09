@@ -14,7 +14,11 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Persists CacheGenie discovery metadata ({@link MavenMetaData}) into the same
@@ -97,6 +101,210 @@ public class MetaRepository {
             }
         } catch (SQLException e) {
             log.error("Failed to save meta for {}:{}", meta.gid, meta.aid, e);
+        }
+    }
+
+    /**
+     * Load a {@code "gid:aid" -> generated} map of when each artifact's metadata
+     * was last written/checked. Used by the scan freshness gate to skip artifacts
+     * re-checked within a staleness window. One query; read-only afterwards.
+     */
+    public Map<String, Instant> loadLastChecked() {
+        Map<String, Instant> out = new HashMap<>();
+        try (Connection conn = getConnection();
+             Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT gid, aid, generated FROM meta_artifacts")) {
+            while (rs.next()) {
+                Instant g = parseInstant(rs.getString("generated"));
+                if (g != null) out.put(rs.getString("gid") + ":" + rs.getString("aid"), g);
+            }
+        } catch (SQLException e) {
+            log.error("Failed to load last-checked timestamps", e);
+        }
+        return out;
+    }
+
+    /** Result of {@link #mergeDiscovered}: whether the group:artifact was newly seen, and how many versions were added. */
+    public record MergeStats(boolean newArtifact, int newVersions) {}
+
+    /**
+     * Merge a freshly-discovered metadata record (from a scan) into the DB:
+     * insert the group:artifact if new, refresh its top-level fields, and add ONLY
+     * versions not already stored. Unlike {@link #save}, this never deletes
+     * versions and never overwrites an existing version's {@code published} or
+     * {@code missing_pom} — so flags set by {@code fetch} survive a re-scan.
+     *
+     * @return how many versions were added and whether the artifact was new.
+     */
+    public synchronized MergeStats mergeDiscovered(MavenMetaData meta) {
+        if (meta == null || meta.gid == null || meta.aid == null) {
+            return new MergeStats(false, 0);
+        }
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                boolean newArtifact;
+                int gaId;
+                try (PreparedStatement sel = conn.prepareStatement(
+                        "SELECT id FROM meta_artifacts WHERE gid = ? AND aid = ?")) {
+                    sel.setString(1, meta.gid);
+                    sel.setString(2, meta.aid);
+                    try (ResultSet rs = sel.executeQuery()) {
+                        if (rs.next()) { gaId = rs.getInt(1); newArtifact = false; }
+                        else { gaId = -1; newArtifact = true; }
+                    }
+                }
+                if (newArtifact) {
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            "INSERT INTO meta_artifacts (id, gid, aid) VALUES (nextval('seq_meta_artifact_id'), ?, ?) RETURNING id")) {
+                        ins.setString(1, meta.gid);
+                        ins.setString(2, meta.aid);
+                        try (ResultSet rs = ins.executeQuery()) { rs.next(); gaId = rs.getInt(1); }
+                    }
+                }
+
+                updateArtifactFields(conn, gaId, meta);
+
+                // Which versions are already stored? (none if the artifact is new)
+                Set<String> existing = new HashSet<>();
+                if (!newArtifact) {
+                    try (PreparedStatement vp = conn.prepareStatement(
+                            "SELECT version FROM meta_versions WHERE ga_id = ?")) {
+                        vp.setInt(1, gaId);
+                        try (ResultSet rs = vp.executeQuery()) {
+                            while (rs.next()) existing.add(rs.getString(1));
+                        }
+                    }
+                }
+
+                int added = 0;
+                try (PreparedStatement insv = conn.prepareStatement(
+                        "INSERT INTO meta_versions (ga_id, version, published, missing_pom) VALUES (?, ?, ?, ?)")) {
+                    for (MavenMetaData.Version v : meta.versions.values()) {
+                        if (existing.contains(v.value())) continue;   // leave existing rows untouched
+                        insv.setInt(1, gaId);
+                        insv.setString(2, v.value());
+                        insv.setString(3, v.date() != null ? v.date().toString() : null);
+                        insv.setBoolean(4, meta.isMissingPom(v.value()));
+                        insv.addBatch();
+                        added++;
+                    }
+                    if (added > 0) insv.executeBatch();
+                }
+
+                conn.commit();
+                return new MergeStats(newArtifact, added);
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            }
+        } catch (SQLException e) {
+            log.error("Failed to merge meta for {}:{}", meta.gid, meta.aid, e);
+            return new MergeStats(false, 0);
+        }
+    }
+
+    /**
+     * Open a streaming writer for bulk index-sync ingestion (Maven Central's
+     * published index): records arrive one GAV at a time, in the millions. Reuses
+     * one connection, caches artifact ids in memory, inserts versions with
+     * ON CONFLICT DO NOTHING, and commits in batches. Use in try-with-resources.
+     */
+    public IndexSyncWriter openIndexSync() throws SQLException {
+        return new IndexSyncWriter();
+    }
+
+    /** Streaming writer for index-sync. Not thread-safe; drive from one thread. */
+    public final class IndexSyncWriter implements AutoCloseable {
+        private static final int COMMIT_EVERY = 5000;
+        private final Connection conn;
+        private final PreparedStatement selArtifact;
+        private final PreparedStatement insArtifact;
+        private final PreparedStatement insVersion;
+        private final PreparedStatement delVersion;
+        private final Map<String, Integer> idCache = new HashMap<>();
+        private int sinceCommit = 0;
+
+        private IndexSyncWriter() throws SQLException {
+            conn = getConnection();
+            conn.setAutoCommit(false);
+            selArtifact = conn.prepareStatement("SELECT id FROM meta_artifacts WHERE gid = ? AND aid = ?");
+            insArtifact = conn.prepareStatement(
+                    "INSERT INTO meta_artifacts (id, gid, aid) VALUES (nextval('seq_meta_artifact_id'), ?, ?) RETURNING id");
+            insVersion = conn.prepareStatement(
+                    "INSERT INTO meta_versions (ga_id, version, published, missing_pom) VALUES (?, ?, ?, false) " +
+                    "ON CONFLICT (ga_id, version) DO NOTHING");
+            delVersion = conn.prepareStatement("DELETE FROM meta_versions WHERE ga_id = ? AND version = ?");
+        }
+
+        // SELECT-then-INSERT (cached): we only INSERT when truly absent, so no
+        // ON CONFLICT is needed on the artifact row.
+        private int artifactId(String gid, String aid) throws SQLException {
+            String key = gid + ":" + aid;
+            Integer id = idCache.get(key);
+            if (id != null) return id;
+            selArtifact.setString(1, gid);
+            selArtifact.setString(2, aid);
+            try (ResultSet rs = selArtifact.executeQuery()) {
+                if (rs.next()) id = rs.getInt(1);
+            }
+            if (id == null) {
+                insArtifact.setString(1, gid);
+                insArtifact.setString(2, aid);
+                try (ResultSet rs = insArtifact.executeQuery()) {
+                    if (rs.next()) id = rs.getInt(1);
+                }
+            }
+            if (id == null) throw new SQLException("could not resolve meta artifact id for " + key);
+            idCache.put(key, id);
+            return id;
+        }
+
+        /** Insert a version if absent. @return true if a new version row was added. */
+        public boolean addVersion(String gid, String aid, String version, Long fileModifiedMillis) {
+            if (gid == null || aid == null || version == null) return false;
+            try {
+                int gaId = artifactId(gid, aid);
+                insVersion.setInt(1, gaId);
+                insVersion.setString(2, version);
+                insVersion.setString(3, fileModifiedMillis != null ? Instant.ofEpochMilli(fileModifiedMillis).toString() : null);
+                int n = insVersion.executeUpdate();
+                maybeCommit();
+                return n > 0;
+            } catch (SQLException e) {
+                log.error("index-sync add {}:{}:{} failed", gid, aid, version, e);
+                return false;
+            }
+        }
+
+        /** Remove a version (incremental ARTIFACT_REMOVE record). */
+        public void removeVersion(String gid, String aid, String version) {
+            if (gid == null || aid == null || version == null) return;
+            try {
+                int gaId = artifactId(gid, aid);
+                delVersion.setInt(1, gaId);
+                delVersion.setString(2, version);
+                delVersion.executeUpdate();
+                maybeCommit();
+            } catch (SQLException e) {
+                log.error("index-sync remove {}:{}:{} failed", gid, aid, version, e);
+            }
+        }
+
+        private void maybeCommit() throws SQLException {
+            if (++sinceCommit >= COMMIT_EVERY) {
+                conn.commit();
+                sinceCommit = 0;
+            }
+        }
+
+        @Override
+        public void close() {
+            try { conn.commit(); } catch (SQLException e) { log.error("final index-sync commit failed", e); }
+            for (PreparedStatement ps : new PreparedStatement[]{selArtifact, insArtifact, insVersion, delVersion}) {
+                try { if (ps != null) ps.close(); } catch (SQLException ignore) { /* ignore */ }
+            }
+            try { conn.close(); } catch (SQLException e) { log.error("closing index-sync connection failed", e); }
         }
     }
 

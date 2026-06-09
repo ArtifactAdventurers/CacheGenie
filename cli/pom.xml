@@ -51,6 +51,12 @@
             <version>1.18.3</version>
         </dependency>
         <dependency>
+            <!-- Dependency-light reader for Maven Central's published index (incremental sync). -->
+            <groupId>org.apache.maven.indexer</groupId>
+            <artifactId>indexer-reader</artifactId>
+            <version>7.1.6</version>
+        </dependency>
+        <dependency>
             <groupId>org.apache.maven.resolver</groupId>
             <artifactId>maven-resolver-api</artifactId>
             <version>1.9.22</version>

@@ -84,7 +84,31 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
 
 - `index` (`scan`) — discover artifact versions in remote repos (or random-walk
   discovery if no `--gav`). State is kept under `~/.m2/cachegenie/work` for
-  resumability.
+  resumability. The random-walk crawls top-level groups concurrently on a worker
+  pool: `--threads <n>` (default 8) sets the worker count, `--rate <req/min>`
+  (default 100) is the **total** crawl budget shared across workers via one
+  `RateLimiter`. Each worker uses its own `MavenMetaDataFactory`/parser
+  (`DocumentBuilder` is not thread-safe); only the limiter is shared. Threaded
+  `IndexCmd` → `IndexAction.index(args, rate, threads)` →
+  `IndexBuilder(cg, rate, threads)`. On each metadata file `handleMeta` calls
+  `MetaRepository.mergeDiscovered` (adds versions missing since last scan,
+  preserves existing rows incl. `fetch`'s `missing_pom`, no deletes) and the
+  scan prints a summary (files read, new artifacts, new versions, skipped-fresh).
+  Undirected scans apply a freshness gate: `--max-age <dur>` (e.g. `7d`/`24h`,
+  `0` = always; default 7d) skips re-fetching `maven-metadata.xml` for artifacts
+  whose `meta_artifacts.generated` is within the window. The gate
+  (`IndexBuilder.shouldFetchMeta`) runs in `MavenStyleHTMLRefNavigator` *before*
+  the fetch and returns an empty link set (no fetch, no descent). It is bypassed
+  for explicit `--gav` requests.
+- `index-sync` (`central-sync`) — discover artifacts/versions from the
+  repository's **published Maven index** (maven-indexer format) instead of
+  crawling HTML. First run pulls the full index; later runs pull only incremental
+  chunks. `--full` ignores local state and re-pulls everything. Local sync state
+  lives in `~/.m2/cachegenie/work/indexer`. Uses `org.apache.maven.indexer:indexer-reader`;
+  `IndexerSyncAction` streams records into the meta tables via
+  `MetaRepository.IndexSyncWriter`. `HttpResourceHandler`/`FileWritableResourceHandler`
+  (in `actions/index`) are the remote/local `ResourceHandler`s. Far fewer requests
+  than `scan`; `scan` remains for targeted `--gav` lookups and immediacy.
 - `meta` (`fetch`) — download missing POMs for indexed versions.
 - `graph` (`map`) — subcommands: `artifact`, `cache`, `query` (SQL against the
   DuckDB graph), `stats`.
