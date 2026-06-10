@@ -87,6 +87,7 @@ public class GraphDepsCmd implements Runnable {
         }
         System.out.printf("Selected %d version(s) to graph%s.%n", work.size(),
                 cutoff != null ? " (published since " + cutoff + ")" : "");
+        progress.total(work.size()); // enables n/total + ETA in progress lines
 
         // Preview only: list the worklist and stop (no resolving/graphing).
         if (list) {

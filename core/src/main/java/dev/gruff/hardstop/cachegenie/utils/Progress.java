@@ -55,11 +55,18 @@ public final class Progress {
     private final long startMillis = System.currentTimeMillis();
     private final AtomicLong count = new AtomicLong();
     private final AtomicLong lastReportMillis = new AtomicLong(startMillis);
+    /** Total expected items; when > 0, progress lines include count/total and an ETA. */
+    private volatile long total = -1;
 
     private Progress(String label, long everyN, long everyMillis) {
         this.label = label;
         this.everyN = Math.max(1, everyN);
         this.everyMillis = Math.max(0, everyMillis);
+    }
+
+    /** Set the total expected item count so progress lines can show {@code n/total} and an ETA. */
+    public void total(long total) {
+        this.total = total;
     }
 
     public void tick() {
@@ -92,11 +99,38 @@ public final class Progress {
 
     private void emit(long n, String detail) {
         long secs = elapsedSeconds();
-        if (detail == null || detail.isEmpty()) {
-            System.err.printf("[progress] %s: %d processed (%d/s)%n", label, n, rate(n, secs));
+        long t = total;
+        String head;
+        if (t > 0) {
+            head = String.format("[progress] %s: %d/%d (%d/s, ETA %s)", label, n, t, rate(n, secs), eta(n, t));
         } else {
-            System.err.printf("[progress] %s: %d processed (%d/s) — %s%n", label, n, rate(n, secs), detail);
+            head = String.format("[progress] %s: %d processed (%d/s)", label, n, rate(n, secs));
         }
+        if (detail == null || detail.isEmpty()) {
+            System.err.println(head);
+        } else {
+            System.err.println(head + " — " + detail);
+        }
+    }
+
+    /** Estimated time remaining based on the average rate so far. */
+    private String eta(long n, long total) {
+        if (n <= 0) return "?";
+        long remaining = total - n;
+        if (remaining <= 0) return "0s";
+        long elapsedMs = System.currentTimeMillis() - startMillis;
+        long etaMs = (long) (elapsedMs * (remaining / (double) n));
+        return formatDuration(etaMs);
+    }
+
+    private static String formatDuration(long ms) {
+        long s = ms / 1000;
+        long h = s / 3600;
+        long m = (s % 3600) / 60;
+        long sec = s % 60;
+        if (h > 0) return String.format("%dh%02dm", h, m);
+        if (m > 0) return String.format("%dm%02ds", m, sec);
+        return sec + "s";
     }
 
     private long elapsedSeconds() {
