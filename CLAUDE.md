@@ -120,13 +120,26 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
 - `meta` (`fetch`) — download missing POMs for indexed versions.
 - `graph` (`map`) — subcommands: `artifact`, `cache`, `deps`, `query` (SQL
   against the DuckDB graph), `stats`. `deps` (`GraphDepsCmd`) builds the
-  **direct**-edge graph for targeted `--gav` selectors driven from the meta
-  catalogue: per version it reads the effective direct dependencies via
+  **direct**-edge graph for a worklist selected from the meta catalogue by
+  `--gav` selectors and/or `--since <dur>` (versions published within a window,
+  e.g. `30d`/`12w`); `MetaRepository.selectVersionsToGraph` does the selection in
+  SQL (excludes `missing_pom` and already-graphed). `--list`/`--dry-run` prints
+  the selected worklist + count and exits without graphing. Per version it reads
+  the effective direct dependencies via
   `Resolver.directDependencies` (Aether `readArtifactDescriptor` — no transitive
   collection) and persists edges via `GraphRepository.persistDirect`; transitive
-  trees are then recursive-CTE queries. Skips already-graphed versions and
-  `missing_pom` ones. Sequential. (`artifact`/`cache` still use the older Aether
-  transitive `resolveGraph`/`persist` path.)
+  trees are then recursive-CTE queries. Skips already-graphed versions
+  (`GraphRepository.loadPresentKeys`) and `missing_pom` ones. `directDependencies`
+  returns a `ResolveOutcome` (`OK`/`NOT_FOUND`/`RATE_LIMITED`/`TRANSIENT`,
+  classified from the Aether exception chain): only `NOT_FOUND` marks the version
+  `missing_pom`; `TRANSIENT` (5xx/timeout/connection) is left for retry; the first
+  `RATE_LIMITED` (HTTP 429) **aborts the whole run** (sets a shared flag, queued
+  workers bail) so a single overload of Maven Central stops us rather than
+  poisoning data. Descriptor
+  reads run on a worker pool (`--threads`, default 8) with a per-thread `Resolver`
+  (Aether sessions aren't shareable); all DB writes are funnelled through one lock
+  (DuckDB single-writer). (`artifact`/`cache` still use the older Aether transitive
+  `resolveGraph`/`persist` path.)
 - `cache` (`hydrate`, `fill`) — download JARs into the local repository.
 - `compare` — API comparison between artifact versions.
 - `db` — manage the DuckDB graph database. Subcommands: `compact` (CHECKPOINT +

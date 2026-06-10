@@ -83,6 +83,18 @@ public class Resolver {
         session.setRepositoryListener(new RepositoryListener(this) {
         });
 
+        // Use the SIMPLE local-repository manager: unlike the default "enhanced"
+        // one it does not track per-artifact remote origin (_remote.repositories),
+        // so cached artifacts are trusted as-is with no network re-verification.
+        // Faster for read/resolve-heavy work like 'graph deps'. Set once here.
+        try {
+            session.setLocalRepositoryManager(
+                    new org.eclipse.aether.internal.impl.SimpleLocalRepositoryManagerFactory()
+                            .newInstance(session, localRepo));
+        } catch (org.eclipse.aether.repository.NoLocalRepositoryManagerException e) {
+            session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
+        }
+
         rrlist = new LinkedList<>();
 
         if(!localOnly) {
@@ -138,7 +150,6 @@ public class Resolver {
 
     public boolean resolvePOM(String d) {
         log.info("resolving POM for {}", d);
-        session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
 
         String[] parts = d.split(":");
         if (parts.length < 3) {
@@ -165,16 +176,27 @@ public class Resolver {
     public record DirectDep(String gid, String aid, String version, String scope) {}
 
     /**
+     * Why a descriptor read ended. {@code OK}: deps available. {@code NOT_FOUND}:
+     * the POM (or a required parent/BOM) genuinely isn't there — safe to mark
+     * missing. {@code RATE_LIMITED}: the remote returned 429 — we're overloading
+     * it, callers should stop. {@code TRANSIENT}: a temporary error (5xx, timeout,
+     * connection) — don't mark missing, retry later.
+     */
+    public enum ResolveOutcome { OK, NOT_FOUND, RATE_LIMITED, TRANSIENT }
+
+    /** Outcome of {@link #directDependencies}; {@code deps} non-null only when {@code outcome == OK}. */
+    public record DirectDepsResult(ResolveOutcome outcome, List<DirectDep> deps) {}
+
+    /**
      * Read an artifact's <em>direct</em> dependencies from its effective POM
      * (parent inheritance, imported BOMs and properties applied, managed versions
      * resolved) WITHOUT collecting the transitive tree. This is the cheap building
      * block for an ecosystem-wide graph: one descriptor read per artifact, with the
      * transitive closure computed later in SQL (recursive CTE).
      *
-     * @return the direct dependencies, or {@code null} if the descriptor could not be read.
+     * @return an outcome the caller can act on (see {@link ResolveOutcome}).
      */
-    public List<DirectDep> directDependencies(String gav) {
-        session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
+    public DirectDepsResult directDependencies(String gav) {
         try {
             Artifact artifact = new DefaultArtifact(gav);
             ArtifactDescriptorRequest request = new ArtifactDescriptorRequest(artifact, rrlist, null);
@@ -185,19 +207,56 @@ public class Resolver {
                 if (da == null) continue;
                 out.add(new DirectDep(da.getGroupId(), da.getArtifactId(), da.getVersion(), d.getScope()));
             }
-            return out;
+            return new DirectDepsResult(ResolveOutcome.OK, out);
         } catch (ArtifactDescriptorException e) {
-            // Expected for some catalogue entries (internal/test modules, or POMs
-            // whose parent/BOM isn't independently resolvable from the remote). The
-            // caller counts these; keep it quiet so they don't drown the output.
-            log.debug("Failed to read descriptor for {}: {}", gav, e.getMessage());
-            return null;
+            ResolveOutcome outcome = classify(e);
+            log.debug("Descriptor read for {} -> {}: {}", gav, outcome, e.getMessage());
+            return new DirectDepsResult(outcome, null);
         }
+    }
+
+    /**
+     * Classify a descriptor-read failure by walking the Aether exception chain.
+     * 429 wins (we're overloading the remote); then genuine not-found; otherwise
+     * treat as transient (do not mark missing). Heuristic — message/type based —
+     * but the 429 detection is what guards against hammering the remote.
+     */
+    private static ResolveOutcome classify(Throwable e) {
+        boolean transientErr = false;
+        boolean notFound = false;
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            String m = t.getMessage();
+            if (m != null) {
+                String ml = m.toLowerCase();
+                // 429 wins outright — we're overloading the remote.
+                if (ml.contains("429") || ml.contains("too many requests")) {
+                    return ResolveOutcome.RATE_LIMITED;
+                }
+                // Temporary: server errors, timeouts, connection issues — retry later.
+                if (ml.contains("status code: 50") || ml.contains("503") || ml.contains("502")
+                        || ml.contains("timed out") || ml.contains("timeout")
+                        || ml.contains("connection reset") || ml.contains("connection refused")
+                        || ml.contains("could not transfer")) {
+                    transientErr = true;
+                }
+                // Definitive not-found phrasings (incl. unresolvable parent POMs).
+                if (ml.contains("could not find artifact") || ml.contains("failure to find")
+                        || ml.contains("non-resolvable parent")) {
+                    notFound = true;
+                }
+            }
+            if (t instanceof org.eclipse.aether.transfer.ArtifactNotFoundException) {
+                notFound = true;
+            }
+        }
+        // Prefer not marking missing when in doubt: transient beats not-found.
+        if (transientErr) return ResolveOutcome.TRANSIENT;
+        if (notFound) return ResolveOutcome.NOT_FOUND;
+        return ResolveOutcome.TRANSIENT;
     }
 
     private List<DependencyNode> collect0(String d) {
         log.info("collecting dependencies for {}", d);
-        session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
         Dependency dependency = new Dependency(new DefaultArtifact(d), JavaScopes.COMPILE);
         CollectRequest cr = new CollectRequest(dependency, rrlist);
 
@@ -218,7 +277,6 @@ public class Resolver {
         log.info("resolving {}",d);
 
 
-        session.setLocalRepositoryManager(system.newLocalRepositoryManager(session, localRepo));
 
 
         Dependency dependency = new Dependency(new DefaultArtifact(d), JavaScopes.COMPILE);

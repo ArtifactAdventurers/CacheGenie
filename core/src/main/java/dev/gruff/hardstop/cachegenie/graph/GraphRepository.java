@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.sql.*;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -158,7 +159,143 @@ public class GraphRepository {
      * edges into {@code dependencies}. Transitive trees are computed at query time
      * with recursive CTEs. {@code INSERT OR IGNORE} makes this idempotent.
      */
-    public void persistDirect(String gid, String aid, String version, List<Resolver.DirectDep> deps) {
+    /** Load already-graphed {@code "gid:aid:version"} keys for a group (or one artifact), for incremental skipping. */
+    public Set<String> loadPresentKeys(String gid, String aid) {
+        Set<String> keys = new HashSet<>();
+        String sql = "SELECT gid, aid, version FROM artifacts WHERE gid = ?" + (aid != null ? " AND aid = ?" : "");
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, gid);
+            if (aid != null) ps.setString(2, aid);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    keys.add(rs.getString(1) + ":" + rs.getString(2) + ":" + rs.getString(3));
+                }
+            }
+        } catch (SQLException e) {
+            log.error("Failed to load present keys for {}:{}", gid, aid, e);
+        }
+        return keys;
+    }
+
+    /**
+     * Open a writer that reuses ONE connection for many direct-edge writes. The
+     * per-call {@link #persistDirect} opens/commits/closes a fresh connection each
+     * time, which — serialised behind a single-writer lock — caps throughput at a
+     * few per second on a large DB. This writer holds the connection open, caches
+     * artifact ids, reuses prepared statements, and commits in batches. Drive it
+     * from a single thread (e.g. all calls under one lock); use try-with-resources.
+     */
+    public DirectWriter openDirectWriter() throws SQLException {
+        return new DirectWriter();
+    }
+
+    /** Reused-connection writer for {@code graph deps}; see {@link #openDirectWriter()}. */
+    public final class DirectWriter implements AutoCloseable {
+        private static final int COMMIT_EVERY = 200;
+        private final Connection conn;
+        private final PreparedStatement selArt;
+        private final PreparedStatement insArt;
+        private final PreparedStatement insEdge;
+        private final PreparedStatement markMissing;
+        private final Map<String, Integer> idCache = new HashMap<>();
+        private int sinceCommit = 0;
+
+        private DirectWriter() throws SQLException {
+            conn = getConnection();
+            conn.setAutoCommit(false);
+            selArt = conn.prepareStatement(
+                    "SELECT id FROM artifacts WHERE gid = ? AND aid = ? AND version = ? AND classifier = ''");
+            insArt = conn.prepareStatement(
+                    "INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES (nextval('seq_artifact_id'), ?, ?, ?, '') RETURNING id");
+            insEdge = conn.prepareStatement(
+                    "INSERT OR IGNORE INTO dependencies (parent_id, child_id, scope) VALUES (?, ?, ?)");
+            markMissing = conn.prepareStatement(
+                    "UPDATE meta_versions SET missing_pom = TRUE WHERE version = ? " +
+                    "AND ga_id = (SELECT id FROM meta_artifacts WHERE gid = ? AND aid = ?)");
+        }
+
+        private int artId(String gid, String aid, String version) throws SQLException {
+            String key = gid + ":" + aid + ":" + version;
+            Integer id = idCache.get(key);
+            if (id != null) return id;
+            selArt.setString(1, gid);
+            selArt.setString(2, aid);
+            selArt.setString(3, version);
+            try (ResultSet rs = selArt.executeQuery()) {
+                if (rs.next()) id = rs.getInt(1);
+            }
+            if (id == null) {
+                insArt.setString(1, gid);
+                insArt.setString(2, aid);
+                insArt.setString(3, version);
+                try (ResultSet rs = insArt.executeQuery()) {
+                    if (rs.next()) id = rs.getInt(1);
+                }
+            }
+            if (id == null) throw new SQLException("could not resolve artifact id for " + key);
+            idCache.put(key, id);
+            return id;
+        }
+
+        /** Persist one artifact's direct edges using the held connection. */
+        public void persistDirect(String gid, String aid, String version, List<Resolver.DirectDep> deps) {
+            try {
+                int parentId = artId(gid, aid, version);
+                for (Resolver.DirectDep d : deps) {
+                    if (d.gid() == null || d.aid() == null || d.version() == null) continue;
+                    int childId = artId(d.gid(), d.aid(), d.version());
+                    if (childId == parentId) continue;
+                    insEdge.setInt(1, parentId);
+                    insEdge.setInt(2, childId);
+                    insEdge.setString(3, d.scope() != null ? d.scope() : "");
+                    insEdge.addBatch();
+                }
+                insEdge.executeBatch();
+                maybeCommit();
+            } catch (SQLException e) {
+                log.error("persistDirect {}:{}:{} failed", gid, aid, version, e);
+                rollbackQuiet();
+            }
+        }
+
+        /** Mark a meta version's POM missing using the held connection. */
+        public void markMissing(String gid, String aid, String version) {
+            try {
+                markMissing.setString(1, version);
+                markMissing.setString(2, gid);
+                markMissing.setString(3, aid);
+                markMissing.executeUpdate();
+                maybeCommit();
+            } catch (SQLException e) {
+                log.error("markMissing {}:{}:{} failed", gid, aid, version, e);
+                rollbackQuiet();
+            }
+        }
+
+        private void maybeCommit() throws SQLException {
+            if (++sinceCommit >= COMMIT_EVERY) {
+                conn.commit();
+                sinceCommit = 0;
+            }
+        }
+
+        private void rollbackQuiet() {
+            try { conn.rollback(); } catch (SQLException ignore) { /* ignore */ }
+            sinceCommit = 0;
+        }
+
+        @Override
+        public void close() {
+            try { conn.commit(); } catch (SQLException e) { log.error("final graph-deps commit failed", e); }
+            for (PreparedStatement ps : new PreparedStatement[]{selArt, insArt, insEdge, markMissing}) {
+                try { if (ps != null) ps.close(); } catch (SQLException ignore) { /* ignore */ }
+            }
+            try { conn.close(); } catch (SQLException e) { log.error("closing graph-deps connection failed", e); }
+        }
+    }
+
+    public synchronized void persistDirect(String gid, String aid, String version, List<Resolver.DirectDep> deps) {
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
             try {

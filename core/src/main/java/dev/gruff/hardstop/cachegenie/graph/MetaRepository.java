@@ -139,6 +139,41 @@ public class MetaRepository {
         return out;
     }
 
+    /**
+     * Select versions that should be graphed: optionally filtered by coordinate
+     * ({@code gid}/{@code aid}/{@code version}, any may be null) and/or published
+     * since {@code since} (null = no time filter). Excludes versions flagged
+     * {@code missing_pom} and versions already present in the {@code artifacts}
+     * graph table. Returns {@code {gid, aid, version}} triples — the worklist for
+     * {@code graph deps}. Requires the {@code artifacts} table to exist.
+     */
+    public List<String[]> selectVersionsToGraph(String gid, String aid, String version, Instant since) {
+        StringBuilder sql = new StringBuilder(
+                "SELECT a.gid, a.aid, v.version FROM meta_versions v " +
+                "JOIN meta_artifacts a ON a.id = v.ga_id " +
+                "WHERE (v.missing_pom IS NULL OR v.missing_pom = FALSE) " +
+                "AND NOT EXISTS (SELECT 1 FROM artifacts ar WHERE ar.gid = a.gid AND ar.aid = a.aid AND ar.version = v.version)");
+        List<String> params = new ArrayList<>();
+        if (gid != null) { sql.append(" AND a.gid = ?"); params.add(gid); }
+        if (aid != null) { sql.append(" AND a.aid = ?"); params.add(aid); }
+        if (version != null) { sql.append(" AND v.version = ?"); params.add(version); }
+        if (since != null) { sql.append(" AND v.published IS NOT NULL AND v.published >= ?"); params.add(since.toString()); }
+
+        List<String[]> out = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new String[]{rs.getString(1), rs.getString(2), rs.getString(3)});
+                }
+            }
+        } catch (SQLException e) {
+            log.error("selectVersionsToGraph failed", e);
+        }
+        return out;
+    }
+
     /** Result of {@link #mergeDiscovered}: whether the group:artifact was newly seen, and how many versions were added. */
     public record MergeStats(boolean newArtifact, int newVersions) {}
 
