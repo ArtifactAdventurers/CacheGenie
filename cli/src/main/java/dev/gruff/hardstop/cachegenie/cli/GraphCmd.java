@@ -261,6 +261,10 @@ public class GraphCmd  {
         @CommandLine.Parameters(index = "0", description = "SQL query to execute", defaultValue = "SELECT * FROM artifacts LIMIT 10")
         String query;
 
+        @CommandLine.Option(names = {"-w", "--write"}, description = "Open the database read-write (needed for INSERT/UPDATE/DDL). " +
+                "By default 'query' opens read-only so it never takes a write lock; note that a read-write open cannot proceed while another process (e.g. 'graph deps') holds the database.")
+        boolean write = false;
+
         @Override
         public void run() {
             CacheGenie cg = parent.parent.genie();
@@ -271,15 +275,24 @@ public class GraphCmd  {
                 return;
             }
 
-            // Ensure both schemas (incl. any column migrations) exist so an ad-hoc
-            // query doesn't trip on a DB created before a column was added.
-            new GraphRepository(cg.cacheGenieRoot());
-            new MetaRepository(cg.cacheGenieRoot());
+            // Default to a READ-ONLY open so an ad-hoc query never takes a write
+            // lock (and can run while the DB is otherwise idle). Schema migrations
+            // require a writer, so only run them on the --write path; a read-only
+            // query against an older DB simply sees whatever columns exist.
+            java.util.Properties props = new java.util.Properties();
+            if (write) {
+                // Ensure both schemas (incl. any column migrations) exist so an
+                // ad-hoc query doesn't trip on a DB created before a column was added.
+                new GraphRepository(cg.cacheGenieRoot());
+                new MetaRepository(cg.cacheGenieRoot());
+            } else {
+                props.setProperty("duckdb.read_only", "true");
+            }
 
-            log.debug("Executing query: {}", query);
-            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath());
+            log.debug("Executing query ({}): {}", write ? "read-write" : "read-only", query);
+            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath(), props);
                  Statement stmt = conn.createStatement()) {
-                
+
                 boolean hasResultSet = stmt.execute(query);
                 if (hasResultSet) {
                     try (ResultSet rs = stmt.getResultSet()) {
@@ -313,7 +326,19 @@ public class GraphCmd  {
                 }
 
             } catch (SQLException e) {
-                System.err.println("SQL Error: " + e.getMessage());
+                String msg = e.getMessage();
+                if (msg != null && (msg.contains("Conflicting lock") || msg.contains("Could not set lock"))) {
+                    System.err.println("graph.db is locked by another CacheGenie process (most likely a running 'graph deps').");
+                    if (write) {
+                        System.err.println("A read-write query cannot attach while it is held; drop --write to query read-only,");
+                        System.err.println("or wait for that run to finish.");
+                    } else {
+                        System.err.println("DuckDB cannot attach (even read-only) while another process holds it read-write;");
+                        System.err.println("wait for that run to finish.");
+                    }
+                } else {
+                    System.err.println("SQL Error: " + msg);
+                }
                 log.error("Failed to execute query", e);
             }
         }
@@ -335,35 +360,56 @@ public class GraphCmd  {
                 return;
             }
 
-            // A fresh 'scan' creates graph.db with only the meta tables, and
-            // 'graph artifact/cache' creates only the graph tables. Ensure both
-            // schemas exist so stats render regardless of which has run yet.
-            new GraphRepository(cg.cacheGenieRoot());
-            new MetaRepository(cg.cacheGenieRoot());
+            // Open READ-ONLY. 'stats' is a pure reader, so it must not take a
+            // write lock - that would block, and be blocked by, a running
+            // 'graph deps'. The trade-off is that we cannot run schema
+            // migrations here, so we tolerate absent tables/columns instead: a
+            // DB created by only 'scan' has just the meta tables; one created by
+            // only 'graph artifact/cache' has just the graph tables.
+            //
+            // NOTE: DuckDB still refuses to open a file (even read-only) while
+            // another process holds it read-write, so this does not let 'stats'
+            // run *during* a 'graph deps' run - it just avoids 'stats' itself
+            // ever taking a write lock. See the lock-conflict message below.
+            java.util.Properties props = new java.util.Properties();
+            props.setProperty("duckdb.read_only", "true");
 
             System.out.println("Graph Database Statistics");
             System.out.println("-------------------------");
             System.out.println("Location: " + dbFile.getAbsolutePath());
             System.out.println("Size: " + (dbFile.length() / 1024) + " KB");
 
-            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath());
+            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath(), props);
                  Statement stmt = conn.createStatement()) {
 
-                // Total Artifacts
+                graphStats(stmt);
+                metaStats(stmt);
+
+            } catch (SQLException e) {
+                String msg = e.getMessage();
+                if (msg != null && (msg.contains("Conflicting lock") || msg.contains("Could not set lock"))) {
+                    System.err.println();
+                    System.err.println("graph.db is locked by another CacheGenie process (most likely a running 'graph deps').");
+                    System.err.println("DuckDB permits only a single read-write process and no concurrent access while it is");
+                    System.err.println("held, so 'stats' cannot attach until that run finishes.");
+                } else {
+                    System.err.println("SQL Error: " + msg);
+                }
+                log.error("Failed to gather statistics", e);
+            }
+        }
+
+        /** Graph-table stats. Prints a note and returns if the graph tables aren't present. */
+        private static void graphStats(Statement stmt) {
+            try {
                 try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM artifacts")) {
-                    if (rs.next()) {
-                        System.out.println("Total Artifacts: " + rs.getLong(1));
-                    }
+                    if (rs.next()) System.out.println("Total Artifacts: " + rs.getLong(1));
                 }
 
-                // Total Dependencies
                 try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM dependencies")) {
-                    if (rs.next()) {
-                        System.out.println("Total Dependency Links: " + rs.getLong(1));
-                    }
+                    if (rs.next()) System.out.println("Total Dependency Links: " + rs.getLong(1));
                 }
 
-                // Top 5 Artifacts by Out-degree (Dependencies)
                 System.out.println("\nTop 5 Artifacts by Number of Dependencies:");
                 String topOutQuery = "SELECT a.gid, a.aid, a.version, COUNT(d.child_id) as count " +
                         "FROM artifacts a JOIN dependencies d ON a.id = d.parent_id " +
@@ -374,7 +420,6 @@ public class GraphCmd  {
                     }
                 }
 
-                // Top 5 Artifacts by In-degree (Dependents)
                 System.out.println("\nTop 5 Most Depended-upon Artifacts:");
                 String topInQuery = "SELECT a.gid, a.aid, a.version, COUNT(d.parent_id) as count " +
                         "FROM artifacts a JOIN dependencies d ON a.id = d.child_id " +
@@ -385,7 +430,6 @@ public class GraphCmd  {
                     }
                 }
 
-                // Scope Distribution
                 System.out.println("\nDependency Scope Distribution:");
                 try (ResultSet rs = stmt.executeQuery("SELECT scope, COUNT(*) FROM dependencies GROUP BY scope ORDER BY COUNT(*) DESC")) {
                     while (rs.next()) {
@@ -394,11 +438,16 @@ public class GraphCmd  {
                         System.out.printf("  %-12s: %d\n", scope, rs.getLong(2));
                     }
                 }
+            } catch (SQLException e) {
+                System.out.println("\n(graph tables not present -- run 'graph deps' to populate)");
+            }
+        }
 
-                // --- Metadata (discovery) statistics, populated by 'scan' ---
-                System.out.println("\nMetadata Statistics");
-                System.out.println("-------------------");
-
+        /** Metadata (discovery) stats, populated by 'scan'. Prints a note and returns if absent. */
+        private static void metaStats(Statement stmt) {
+            System.out.println("\nMetadata Statistics");
+            System.out.println("-------------------");
+            try {
                 long metaArtifacts = 0;
                 try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM meta_artifacts")) {
                     if (rs.next()) metaArtifacts = rs.getLong(1);
@@ -443,10 +492,8 @@ public class GraphCmd  {
                     }
                     if (!any) System.out.println("  (none)");
                 }
-
             } catch (SQLException e) {
-                System.err.println("SQL Error: " + e.getMessage());
-                log.error("Failed to gather statistics", e);
+                System.out.println("(meta tables not present -- run 'scan' to populate)");
             }
         }
     }

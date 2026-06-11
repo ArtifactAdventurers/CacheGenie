@@ -5,6 +5,7 @@ import dev.gruff.hardstop.cachegenie.graph.GraphRepository;
 import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
 import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.resolver.Resolver;
+import dev.gruff.hardstop.treestreamer.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -33,6 +34,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link Resolver} (Aether sessions aren't shareable); DB writes are funnelled
  * through one lock (DuckDB single-writer). A version whose descriptor can't be read
  * is marked {@code missing_pom} so re-runs skip it.
+ *
+ * <p>A single shared {@link RateLimiter} paces the total descriptor-read rate across
+ * all workers ({@code --rate <req/min>}, {@code 0} = unlimited), so the remote isn't
+ * hammered regardless of {@code --threads}. The limiter takes one permit per artifact,
+ * but resolving an effective POM can fan out into several real HTTP requests (parent
+ * POMs, imported BOMs), so the actual remote request rate is a multiple of
+ * {@code --rate} — set it conservatively. This is the proactive complement to the
+ * reactive 429 abort.
  */
 @CommandLine.Command(name = "deps",
         description = "Build the direct-dependency graph for targeted/recent versions from the catalogue (transitive trees are then queryable via recursive SQL)")
@@ -53,6 +62,16 @@ public class GraphDepsCmd implements Runnable {
     @CommandLine.Option(names = {"--threads"}, paramLabel = "<n>",
             description = "Concurrent descriptor-read workers (default ${DEFAULT-VALUE}).")
     int threads = 8;
+
+    /** Default total descriptor reads per minute across all workers. */
+    static final int DEFAULT_RATE_PER_MINUTE = 100;
+
+    @CommandLine.Option(names = {"--rate"}, paramLabel = "<req/min>",
+            description = "Total descriptor reads per minute across all workers (default ${DEFAULT-VALUE}); 0 = unlimited. "
+                    + "Lower it to be gentler on Maven Central. NOTE: this paces one permit per artifact, but reading an "
+                    + "effective POM can fan out into several actual HTTP requests (parent POMs, imported BOMs), so the real "
+                    + "request rate to the remote is a multiple of this — set it conservatively.")
+    int rate = DEFAULT_RATE_PER_MINUTE;
 
     @CommandLine.Option(names = {"--list", "--dry-run"},
             description = "List the selected versions and count, then exit without building their graphs.")
@@ -99,6 +118,12 @@ public class GraphDepsCmd implements Runnable {
         }
 
         // 2. Resolve in parallel; serialise all DB writes under one lock.
+        // One shared, thread-safe limiter paces the total descriptor-read rate across
+        // all workers (mirrors how IndexCmd throttles the crawl). rate <= 0 = unlimited.
+        RateLimiter limiter = (rate > 0) ? new RateLimiter(rate, Duration.ofMinutes(1)) : null;
+        if (limiter != null) {
+            System.out.printf("Throttling descriptor reads to ~%d/min across %d worker(s).%n", rate, Math.max(1, threads));
+        }
         ThreadLocal<Resolver> resolver = ThreadLocal.withInitial(() -> Resolver.Builder(cg).build());
         Object writeLock = new Object();
         AtomicLong graphed = new AtomicLong(), edges = new AtomicLong(), notFound = new AtomicLong(), transientErr = new AtomicLong();
@@ -110,6 +135,17 @@ public class GraphDepsCmd implements Runnable {
             for (String[] w : work) {
                 futures.add(pool.submit(() -> {
                     if (rateLimited.get()) return; // throttled — bail fast, don't keep hammering
+                    // Acquire a permit before the network call so the total rate stays bounded
+                    // regardless of thread count. Blocks until the shared budget allows it.
+                    if (limiter != null) {
+                        try {
+                            limiter.waitForPermission();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                    }
+                    if (rateLimited.get()) return; // a 429 may have landed while we waited for a permit
                     String gav = w[0] + ":" + w[1] + ":" + w[2];
                     progress.tick(gav);
                     Resolver.DirectDepsResult r = resolver.get().directDependencies(gav);
