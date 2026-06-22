@@ -174,6 +174,66 @@ public class MetaRepository {
         return out;
     }
 
+    /**
+     * Like {@link #selectVersionsToGraph}, but the worklist for {@code graph mine}:
+     * versions not yet mined (no {@code pom_meta} row) rather than not yet graphed.
+     * Excludes {@code missing_pom} versions. Returns {@code {gid, aid, version}}
+     * triples. Requires the {@code pom_meta}/{@code artifacts} tables to exist.
+     */
+    public List<String[]> selectVersionsToMine(String gid, String aid, String version, Instant since, int limit) {
+        StringBuilder sql = new StringBuilder(
+                "SELECT a.gid, a.aid, v.version FROM meta_versions v " +
+                "JOIN meta_artifacts a ON a.id = v.ga_id " +
+                "WHERE (v.missing_pom IS NULL OR v.missing_pom = FALSE) " +
+                "AND NOT EXISTS (SELECT 1 FROM artifacts ar JOIN pom_meta pm ON pm.artifact_id = ar.id " +
+                "WHERE ar.gid = a.gid AND ar.aid = a.aid AND ar.version = v.version)");
+        List<String> params = new ArrayList<>();
+        if (gid != null) { sql.append(" AND a.gid = ?"); params.add(gid); }
+        if (aid != null) { sql.append(" AND a.aid = ?"); params.add(aid); }
+        if (version != null) { sql.append(" AND v.version = ?"); params.add(version); }
+        if (since != null) { sql.append(" AND v.published IS NOT NULL AND v.published >= ?"); params.add(since.toString()); }
+        if (limit > 0) { sql.append(" LIMIT ").append(limit); } // bounded chunk for a polite drip
+
+        List<String[]> out = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new String[]{rs.getString(1), rs.getString(2), rs.getString(3)});
+                }
+            }
+        } catch (SQLException e) {
+            log.error("selectVersionsToMine failed", e);
+        }
+        return out;
+    }
+
+    /** Count the {@link #selectVersionsToMine} worklist without materialising it (cheap {@code COUNT(*)}). */
+    public long countVersionsToMine(String gid, String aid, String version, Instant since) {
+        StringBuilder sql = new StringBuilder(
+                "SELECT COUNT(*) FROM meta_versions v " +
+                "JOIN meta_artifacts a ON a.id = v.ga_id " +
+                "WHERE (v.missing_pom IS NULL OR v.missing_pom = FALSE) " +
+                "AND NOT EXISTS (SELECT 1 FROM artifacts ar JOIN pom_meta pm ON pm.artifact_id = ar.id " +
+                "WHERE ar.gid = a.gid AND ar.aid = a.aid AND ar.version = v.version)");
+        List<String> params = new ArrayList<>();
+        if (gid != null) { sql.append(" AND a.gid = ?"); params.add(gid); }
+        if (aid != null) { sql.append(" AND a.aid = ?"); params.add(aid); }
+        if (version != null) { sql.append(" AND v.version = ?"); params.add(version); }
+        if (since != null) { sql.append(" AND v.published IS NOT NULL AND v.published >= ?"); params.add(since.toString()); }
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong(1);
+            }
+        } catch (SQLException e) {
+            log.error("countVersionsToMine failed", e);
+        }
+        return -1;
+    }
+
     /** Result of {@link #mergeDiscovered}: whether the group:artifact was newly seen, and how many versions were added. */
     public record MergeStats(boolean newArtifact, int newVersions) {}
 

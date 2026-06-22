@@ -28,6 +28,14 @@ split along that line:
   Resolver (Aether) and persist the resulting nodes and edges via
   `GraphRepository`. This data comes from the POM `<dependencies>` — it is **not**
   in the index, which is why `index-sync` alone can't build the graph.
+- **POM mining** (`pom_meta`, `direct_dep`, `dependency_management`,
+  `pom_properties`, `pom_developers`, `pom_licenses`) — *what each POM declares,
+  raw*. Populated by the raw-mining path: one descriptor-free fetch+parse per
+  artifact, storing exactly what `this` pom.xml declares — **no parent
+  inheritance, no `${...}` interpolation, no managed-version resolution**. A later
+  resolution pass walks `parent_*` up the chain (and across import-scope BOMs) to
+  fill inherited fields, interpolate properties, and project resolvable edges into
+  the concrete `dependencies` table. See *POM mining tables* below.
 
 The "Source" column in each table below names the command(s) that write each
 field. A field can be null simply because the pipeline that fills it hasn't run
@@ -115,6 +123,149 @@ not stored. These columns are null for versions discovered only via the HTML
 > Timestamps in the meta tables are stored as ISO-8601 strings rather than
 > native `TIMESTAMP` to avoid timezone conversion surprises; they round-trip
 > through `Instant.toString()` / `Instant.parse()`.
+
+## POM mining tables
+
+These hold **raw, as-declared** data from each parsed `pom.xml` — no inheritance,
+no property interpolation, no managed-version resolution. They exist to support a
+crawl that visits every catalogue version once, mines its POM, and resolves the
+effective view **later in SQL** rather than via Aether's per-artifact network
+fan-out.
+
+### The deferred parent model (why there is no repeated download)
+
+A child POM is mined **without fetching its parent**. The `pom_meta.parent_*`
+columns store the parent's *coordinates*, not a resolved id. Because every parent
+and BOM is itself a published `pom` artifact that `index-sync` already catalogues,
+each is mined **exactly once, as its own node, on its own turn** — never refetched
+per child that inherits from it. Resolution is then a graph operation: to fill a
+child's inherited SCM/organization/etc. or resolve a managed dependency version,
+join up `parent_gid/parent_aid/parent_version` (recursively) and across
+import-scope rows in `dependency_management`. Identity/SCM/org fields are
+frequently inherited, so they are often null on the child until that pass runs.
+
+All tables key off `artifacts.id` (the declaring POM's node) and declare **no FK
+constraints** (matching `dependencies`), since referenced parent/dependency nodes
+may legitimately not exist yet at mine time.
+
+### `pom_meta`
+One row per parsed POM. **Populated by** the raw-mining path.
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `artifact_id` | `INTEGER` | PK; logical FK to `artifacts.id` (this POM). |
+| `packaging` | `VARCHAR` | `<packaging>` (`jar`, `pom`, …). |
+| `parent_gid` / `parent_aid` / `parent_version` | `VARCHAR` | Raw `<parent>` coordinates; null = no parent. Resolved to a node later. |
+| `parent_relpath` | `VARCHAR` | `<parent><relativePath>` if present. |
+| `name` / `description` / `url` / `inception_year` | `VARCHAR` | Project identity/provenance (often inherited → may be null). |
+| `organization_name` / `organization_url` | `VARCHAR` | `<organization>` (often inherited). |
+| `scm_url` / `scm_connection` / `scm_dev_connection` / `scm_tag` | `VARCHAR` | `<scm>` fields (frequently inherited → may be null). |
+| `issue_system` / `issue_url` | `VARCHAR` | `<issueManagement>`. |
+| `ci_system` / `ci_url` | `VARCHAR` | `<ciManagement>`. |
+| `mined_at` | `VARCHAR` | ISO-8601 timestamp this POM was mined. |
+| `deps_resolved` | `BOOLEAN` | True once `direct_dep` rows for this POM have been projected into `dependencies`. Default false. |
+| `meta_resolved` | `BOOLEAN` | True once inherited identity/SCM/org fields have been coalesced from the parent chain. Default false. |
+
+### `direct_dep`
+Declared direct dependencies, **raw**. The version may be null (managed), a
+property token, or a range, which is why these cannot yet map to a concrete child
+`artifacts.id`; the resolution pass projects resolvable rows into `dependencies`.
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `artifact_id` | `INTEGER` | Logical FK to `artifacts.id` (declaring POM). |
+| `ord` | `INTEGER` | Declaration order within the POM. |
+| `dep_gid` / `dep_aid` | `VARCHAR` | Dependency coordinates. |
+| `dep_version` | `VARCHAR` | Raw version token; null when managed elsewhere. |
+| `scope` | `VARCHAR` | Raw `<scope>`; null → `compile` applied at resolution. |
+| `dep_type` | `VARCHAR` | `<type>`, default `jar`. |
+| `dep_classifier` | `VARCHAR` | `<classifier>`, default `''`. |
+| `optional` | `BOOLEAN` | `<optional>`, default false. |
+
+**Constraints:** `PRIMARY KEY (artifact_id, ord)` — every declared row kept verbatim (duplicate coordinates are not collapsed).
+
+### `dependency_management`
+`<dependencyManagement>` entries, including import-scope BOMs (`scope='import'`,
+`dep_type='pom'`). The source for resolving a child's managed versions.
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `artifact_id` | `INTEGER` | Logical FK to `artifacts.id` (declaring POM). |
+| `ord` | `INTEGER` | Declaration order within the POM. |
+| `dep_gid` / `dep_aid` | `VARCHAR` | Managed coordinates. |
+| `dep_version` | `VARCHAR` | Managed version (may be a property token). |
+| `scope` | `VARCHAR` | `import` for BOMs. |
+| `dep_type` | `VARCHAR` | Default `jar`; `pom` for BOMs. |
+| `dep_classifier` | `VARCHAR` | Default `''`. |
+
+**Constraints:** `PRIMARY KEY (artifact_id, ord)`.
+
+### `pom_properties`
+`<properties>` for interpolating `${...}` tokens at resolution time (properties
+may themselves be inherited).
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `artifact_id` | `INTEGER` | Logical FK to `artifacts.id`. |
+| `prop_key` | `VARCHAR` | Property name (`key`/`value` avoided as reserved-word risk). |
+| `prop_value` | `VARCHAR` | Property value (may itself contain `${...}`). |
+
+**Constraints:** `PRIMARY KEY (artifact_id, prop_key)`.
+
+### `pom_developers`
+`<developers>` and `<contributors>`.
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `artifact_id` | `INTEGER` | Logical FK to `artifacts.id`. |
+| `ord` | `INTEGER` | Order within the POM. |
+| `role_kind` | `VARCHAR` | `developer` or `contributor`. |
+| `dev_id` | `VARCHAR` | `<id>` (developers only). |
+| `name` / `email` / `url` | `VARCHAR` | Person fields. |
+| `organization` / `organization_url` | `VARCHAR` | Affiliation. |
+| `roles` | `VARCHAR` | Comma-joined `<roles>`. |
+
+**Constraints:** `PRIMARY KEY (artifact_id, ord)`.
+
+### `pom_licenses`
+`<licenses>`.
+
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `artifact_id` | `INTEGER` | Logical FK to `artifacts.id`. |
+| `ord` | `INTEGER` | Order within the POM. |
+| `name` / `url` / `distribution` | `VARCHAR` | License fields. |
+
+**Constraints:** `PRIMARY KEY (artifact_id, ord)`.
+
+### Indexes
+
+`db optimize` creates these (the resolution pass joins heavily on parent and
+dependency coordinates):
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_pom_meta_parent  ON pom_meta(parent_gid, parent_aid, parent_version);
+CREATE INDEX IF NOT EXISTS idx_direct_dep_coord ON direct_dep(dep_gid, dep_aid);
+CREATE INDEX IF NOT EXISTS idx_depmgmt_coord    ON dependency_management(dep_gid, dep_aid);
+```
+
+### Mining workflow
+
+```
+index-sync           # catalogue what exists (meta_*)
+graph mine           # fetch each raw POM once -> pom_meta/direct_dep/... (no fan-out)
+graph resolve        # parent/BOM/property resolution -> concrete `dependencies` edges
+```
+
+`graph mine` selects un-mined versions (no `pom_meta` row, not `missing_pom`) and
+fetches only the `.pom` (one GET, no parent/BOM download — parents are mined as
+their own nodes). `graph resolve` (first-cut `PomResolver`) walks the mined parent
+chain and import BOMs to fill managed versions, interpolates `${...}` properties,
+and writes resolvable direct edges into `dependencies` (setting
+`pom_meta.deps_resolved`). It does **not** handle version ranges, profiles,
+exclusions, or relocation, and does not yet coalesce inherited project metadata
+(scm/org/…) — those stay raw in `pom_meta`. This path is the polite alternative to
+`graph deps`, which still uses Aether's effective-POM resolution directly.
 
 ## Views
 

@@ -164,6 +164,10 @@ public final class DBAction {
                 "CREATE INDEX IF NOT EXISTS idx_artifacts_ga ON artifacts(gid, aid)",
                 "CREATE INDEX IF NOT EXISTS idx_dependencies_child ON dependencies(child_id)",
                 "CREATE INDEX IF NOT EXISTS idx_meta_artifacts_ga ON meta_artifacts(gid, aid)",
+                // POM-mining: parent-chain joins and managed-version lookups during 'graph resolve'.
+                "CREATE INDEX IF NOT EXISTS idx_pom_meta_parent ON pom_meta(parent_gid, parent_aid, parent_version)",
+                "CREATE INDEX IF NOT EXISTS idx_direct_dep_coord ON direct_dep(dep_gid, dep_aid)",
+                "CREATE INDEX IF NOT EXISTS idx_depmgmt_coord ON dependency_management(dep_gid, dep_aid)",
         };
         try (Connection conn = open(); Statement st = conn.createStatement()) {
             for (String sql : ddl) {

@@ -188,6 +188,13 @@ public class Resolver {
     public record DirectDepsResult(ResolveOutcome outcome, List<DirectDep> deps) {}
 
     /**
+     * Outcome of a raw {@code .pom} fetch (see {@link PomFetcher}); {@code file} is
+     * non-null only when {@code outcome == OK}. Lives here so it can share
+     * {@link ResolveOutcome} with the descriptor-read path.
+     */
+    public record PomFetch(ResolveOutcome outcome, File file) {}
+
+    /**
      * Read an artifact's <em>direct</em> dependencies from its effective POM
      * (parent inheritance, imported BOMs and properties applied, managed versions
      * resolved) WITHOUT collecting the transitive tree. This is the cheap building

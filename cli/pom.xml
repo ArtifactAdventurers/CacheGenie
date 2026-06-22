@@ -86,6 +86,15 @@
             <artifactId>maven-resolver-provider</artifactId>
             <version>3.9.9</version>
         </dependency>
+        <dependency>
+            <!-- Bolt driver for 'graph push-neo4j'. Apache-2.0 (NOT the GPL Neo4j server),
+                 so bundling it carries no copyleft obligation. The 5.26 driver speaks the
+                 Bolt versions used by Neo4j 5.x AND the 2025/2026 CalVer servers (and still
+                 connects to 4.4), so it matches whatever server 'push-neo4j' targets. -->
+            <groupId>org.neo4j.driver</groupId>
+            <artifactId>neo4j-java-driver</artifactId>
+            <version>5.26.0</version>
+        </dependency>
     </dependencies>
     <build>
     </build>

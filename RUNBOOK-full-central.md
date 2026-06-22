@@ -82,6 +82,15 @@ cg analyse meta              # discovery-metadata counts from the meta tables
 
 ## Step 2 — Build the direct-dependency graph (the heavy step)
 
+> **Prefer `mine` + `resolve` over `deps` at scale, and seed from Goblin if you can.**
+> `graph deps` (below) uses Aether's effective-POM read, which fans out into
+> parent/BOM fetches per artifact and trips Central's 429s. The polite path is to
+> seed the bulk graph from the Goblin dataset (`GOBLIN-IMPORT.md`) and then mine only
+> the delta with `graph mine` (one GET per POM, no fan-out) + `graph resolve` —
+> routed through the Google GCS mirror. See **`MINING.md`** for the rate guidance,
+> the `-r` mirror URL, and resumable/chunked runs. The `graph deps` description here
+> is retained for targeted, immediate lookups.
+
 `graph deps` (alias under `graph`/`map`) is what turns the catalogue into edges.
 For each selected version that isn't already graphed and isn't marked
 `missing_pom`, it reads the artifact's **effective** direct dependencies (one

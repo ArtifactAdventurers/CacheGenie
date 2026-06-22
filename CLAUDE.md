@@ -118,8 +118,8 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   `-c <scratch>`). Far fewer requests than `scan`; `scan` remains for targeted
   `--gav` lookups and immediacy.
 - `meta` (`fetch`) — download missing POMs for indexed versions.
-- `graph` (`map`) — subcommands: `artifact`, `cache`, `deps`, `query` (SQL
-  against the DuckDB graph), `stats`. `deps` (`GraphDepsCmd`) builds the
+- `graph` (`map`) — subcommands: `artifact`, `cache`, `deps`, `mine`, `resolve`,
+  `import-goblin`, `export-neo4j`, `push-neo4j`, `query` (SQL against the DuckDB graph), `stats`. `deps` (`GraphDepsCmd`) builds the
   **direct**-edge graph for a worklist selected from the meta catalogue by
   `--gav` selectors and/or `--since <dur>` (versions published within a window,
   e.g. `30d`/`12w`); `MetaRepository.selectVersionsToGraph` does the selection in
@@ -138,8 +138,44 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   poisoning data. Descriptor
   reads run on a worker pool (`--threads`, default 8) with a per-thread `Resolver`
   (Aether sessions aren't shareable); all DB writes are funnelled through one lock
-  (DuckDB single-writer). (`artifact`/`cache` still use the older Aether transitive
-  `resolveGraph`/`persist` path.)
+  (DuckDB single-writer). `deps` also takes `--rate <req/min>` (shared
+  `RateLimiter`, one permit per artifact; `0`=unlimited) to proactively throttle
+  descriptor reads across workers. (`artifact`/`cache` still use the older Aether
+  transitive `resolveGraph`/`persist` path.)
+  `mine` (`GraphMineCmd`) is the polite alternative to `deps`: it fetches **only the
+  `.pom`** per version via `PomFetcher` (local `~/.m2` first, else one plain HTTP GET
+  saved into `~/.m2` — no Aether, no checksum request, no descriptor read, so no
+  parent/BOM fan-out), parses it with the thread-safe `RawPomParser` (per-thread
+  `DocumentBuilder`), and stores the **raw, as-declared** POM (deps,
+  dependencyManagement, parent ref, properties, scm, developers, licenses) via
+  `GraphRepository.MiningWriter` into the `pom_meta`/`direct_dep`/
+  `dependency_management`/`pom_properties`/`pom_developers`/`pom_licenses` tables.
+  Worklist is `MetaRepository.selectVersionsToMine` (un-mined = no `pom_meta` row);
+  same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`. Parents
+  and BOMs are mined once as their own nodes, never re-downloaded per child.
+  `resolve` (`GraphResolveCmd` → `PomResolver`) is the deferred resolution pass: it
+  walks the mined parent chain + import BOMs to fill managed versions, interpolates
+  `${...}` properties, and projects resolvable direct edges into the concrete
+  `dependencies` table (`pom_meta.deps_resolved`). First-cut — does **not** handle
+  version ranges, profiles, `<exclusions>`, relocation, or inherited-metadata
+  coalescing (raw values stay in `pom_meta`).
+  `import-goblin` (`GraphImportCmd` → `GraphRepository.importGoblinEdges`) seeds
+  `artifacts`/`dependencies` from a Goblin CSV export (Aether-resolved edges,
+  equivalent to `graph deps`, for all of Central up to the dataset snapshot) via a
+  set-based DuckDB load — minutes, no Central traffic. Then keep current with
+  `mine --since <snapshot>`. See `GOBLIN-IMPORT.md`.
+  `export-neo4j` (`GraphExportNeo4jCmd` → `GraphRepository.exportNeo4jCsv`) writes the
+  graph as `neo4j-admin import` CSVs in Goblin's schema (Release/Artifact nodes,
+  `relationship_AR`, `dependency` edges w/ targetVersion+scope) for the hybrid model:
+  DuckDB stays system-of-record, Neo4j is an optional read-side for traversal/Weaver.
+  CacheGenie only writes CSVs (no Neo4j embedding → no GPL entanglement). See
+  `HYBRID-NEO4J.md`.
+  `push-neo4j` (`GraphPushNeo4jCmd`) is the primary hybrid flow: it MERGEs DuckDB's
+  graph delta into an **existing** Neo4j graph (a loaded Goblin dump) directly over
+  Bolt — idempotent, additive, batched (`--uri/--user/--password/--since/--batch-size`).
+  Neo4j stays the canonical graph; DuckDB is the working store that tops it up. Uses
+  the Apache-2.0 `org.neo4j.driver:neo4j-java-driver` (added to `cli/pom.xml`) — the
+  GPL applies to the Neo4j server, not the Bolt driver, so bundling it is fine.
 - `cache` (`hydrate`, `fill`) — download JARs into the local repository.
 - `compare` — API comparison between artifact versions.
 - `db` — manage the DuckDB graph database. Subcommands: `compact` (CHECKPOINT +
@@ -214,5 +250,9 @@ Run with `mvn test`.
 ## Reference docs
 
 - `README.md` — user-facing usage and full command/option reference.
-- `DB_SCHEMA.md` — DuckDB graph schema and example analysis queries.
+- `DB_SCHEMA.md` — DuckDB graph schema (incl. POM-mining tables) and example analysis queries.
 - `CHANGELOG.md` — Keep a Changelog format, SemVer.
+- `MINING.md` — running `graph mine` at scale politely: the Google GCS mirror (`-r`), rate guidance, resumable/chunked (`--limit`) runs.
+- `GOBLIN-IMPORT.md` — seed the graph from the Goblin dataset (Neo4j 4.x dump → CSV → `import-goblin`); incl. the 4.x-vs-CalVer version caveat.
+- `HYBRID-NEO4J.md` — DuckDB system-of-record + optional Neo4j read-side (`export-neo4j` for a fresh build, `push-neo4j` to top up an existing graph).
+- `RUNBOOK-full-central.md` — end-to-end "zero to full Maven Central graph" pipeline.

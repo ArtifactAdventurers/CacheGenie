@@ -23,7 +23,7 @@ import java.util.Set;
 import java.sql.*;
 
 
-@CommandLine.Command(name = "graph", aliases = {"map"}, description = "Produce graph of artifact dependencies ", subcommands = {GraphCmd.GraphCacheCmd.class, GraphCmd.GraphArtifact.class, GraphDepsCmd.class, GraphCmd.GraphQueryCmd.class, GraphCmd.GraphStatsCmd.class})
+@CommandLine.Command(name = "graph", aliases = {"map"}, description = "Produce graph of artifact dependencies ", subcommands = {GraphCmd.GraphCacheCmd.class, GraphCmd.GraphArtifact.class, GraphDepsCmd.class, GraphMineCmd.class, GraphResolveCmd.class, GraphImportCmd.class, GraphExportNeo4jCmd.class, GraphPushNeo4jCmd.class, GraphCmd.GraphQueryCmd.class, GraphCmd.GraphStatsCmd.class})
 public class GraphCmd  {
     private static final Logger log = LoggerFactory.getLogger(GraphCmd.class);
 
