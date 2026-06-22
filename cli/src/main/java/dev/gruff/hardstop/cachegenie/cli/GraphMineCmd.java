@@ -127,26 +127,38 @@ public class GraphMineCmd implements Runnable {
             System.exit(0);
         }
 
-        // Real run: materialise the worklist (bounded by --limit). Use --limit for big
-        // backlogs so this stays bounded in memory and requests; re-runs resume.
-        List<String[]> work = new ArrayList<>();
+        // Real run: stream the worklist in bounded keyset PAGES so a multi-million-row backlog
+        // runs in CONSTANT memory regardless of catalogue size. (The old path materialised the
+        // entire worklist into one List AND pre-submitted every task to an unbounded executor
+        // queue while retaining every Future — that OOM'd on a full-Central run.) Per page we
+        // read it (closing the read connection), then mine it through the worker pool with all
+        // DB writes funnelled to one drainer thread. The reader and writer are never open at the
+        // same time — the invariant graph mine/deps have always relied on.
+        final int PAGE_SIZE = 50_000;
+
+        // Selector filters: each is {gid, aid, version} (aid/version null = wildcard).
+        List<String[]> selectors = new ArrayList<>();
         if (hasGav) {
             for (String sel : gavs) {
                 String[] p = sel.trim().split(":");
                 String gid = p[0];
                 String aid = (p.length > 1 && !p[1].equals("*")) ? p[1] : null;
                 String ver = (p.length > 2 && !p[2].equals("*")) ? p[2] : null;
-                work.addAll(metaRepo.selectVersionsToMine(gid, aid, ver, cutoff, limit));
+                selectors.add(new String[]{gid, aid, ver});
             }
         } else {
-            work.addAll(metaRepo.selectVersionsToMine(null, null, null, cutoff, limit));
+            selectors.add(new String[]{null, null, null});
         }
-        // Cap the combined worklist when --limit spans multiple --gav selectors.
-        if (limit > 0 && work.size() > limit) {
-            work = new ArrayList<>(work.subList(0, limit));
+
+        // Total for n/total + ETA — a cheap COUNT(*), capped by --limit when set.
+        long total = 0;
+        for (String[] s : selectors) {
+            long c = metaRepo.countVersionsToMine(s[0], s[1], s[2], cutoff);
+            if (c > 0) total += c;
         }
-        System.out.printf("Selected %d version(s) to mine%s.%n", work.size(), windowNote);
-        progress.total(work.size());
+        if (limit > 0) total = Math.min(total, limit);
+        System.out.printf("Selected %d version(s) to mine%s.%n", total, windowNote);
+        progress.total(total);
 
         RateLimiter limiter = (rate > 0) ? new RateLimiter(rate, Duration.ofMinutes(1)) : null;
         if (limiter != null) {
@@ -159,76 +171,96 @@ public class GraphMineCmd implements Runnable {
                 transientErr = new AtomicLong(), parseFailed = new AtomicLong();
         AtomicBoolean rateLimited = new AtomicBoolean(false);
 
-        // All DB writes funnel to ONE drainer thread (DuckDB is single-writer); the fetch
-        // workers only fetch+parse and hand results to the bounded queue. This removes the
-        // old per-item write lock, so network fetches and the bulk DB writes fully overlap
-        // and more fetch threads actually raise throughput. The bounded queue back-pressures
-        // the workers if the writer ever falls behind.
-        BlockingQueue<WriteItem> writeQ = new ArrayBlockingQueue<>(10_000);
-        final WriteItem poison = new WriteItem(null, null);
-        AtomicBoolean writerDead = new AtomicBoolean(false);
-        Thread drainer = new Thread(() -> {
-            try (GraphRepository.MiningWriter writer = gr.openMiningWriter()) {
-                for (;;) {
-                    WriteItem it = writeQ.take();
-                    if (it == poison) break;
-                    if (it.pom() != null) { writer.appendMined(it.pom()); mined.incrementAndGet(); }
-                    else { writer.appendMissing(it.missing()[0], it.missing()[1], it.missing()[2]); notFound.incrementAndGet(); }
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception e) {
-                log.error("graph mine writer failed: {}", e.getMessage(), e);
-            } finally {
-                writerDead.set(true);
-            }
-        }, "mine-writer");
-        drainer.start();
-
+        // One worker pool, reused across all pages (it touches no DB — only fetch+parse).
         ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, threads));
-        List<Future<?>> futures = new ArrayList<>();
-        for (String[] w : work) {
-            futures.add(pool.submit(() -> {
-                if (rateLimited.get() || writerDead.get()) return;
-                if (limiter != null) {
-                    try { limiter.waitForPermission(); }
-                    catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-                }
-                if (rateLimited.get() || writerDead.get()) return;
-                String gav = w[0] + ":" + w[1] + ":" + w[2];
-                progress.tick(gav);
-                Resolver.PomFetch fetch = fetcher.fetch(gav);
-                switch (fetch.outcome()) {
-                    case RATE_LIMITED -> {
-                        if (rateLimited.compareAndSet(false, true)) {
-                            log.error("Maven Central returned 429 (rate limited) on {} — stopping to avoid overloading it.", gav);
+
+        long budget = (limit > 0) ? limit : Long.MAX_VALUE;
+        long processed = 0;
+        pages:
+        for (String[] sel : selectors) {
+            String[] cursor = null; // keyset over (gid, aid, version)
+            while (!rateLimited.get() && processed < budget) {
+                int pageLimit = (int) Math.min(PAGE_SIZE, budget - processed);
+                List<String[]> page =
+                        metaRepo.selectVersionsToMineAfter(sel[0], sel[1], sel[2], cutoff, cursor, pageLimit);
+                if (page.isEmpty()) break; // selector exhausted
+                cursor = page.get(page.size() - 1);
+                processed += page.size();
+
+                // All DB writes for THIS page funnel to ONE drainer thread (DuckDB single-writer);
+                // fetch workers only fetch+parse and hand results to the bounded queue, which
+                // back-pressures them if the writer falls behind. The writer is opened here (after
+                // the page read closed its connection) and flushed/closed when the page completes —
+                // so a reader and a writer are never open against graph.db at the same time.
+                BlockingQueue<WriteItem> writeQ = new ArrayBlockingQueue<>(10_000);
+                final WriteItem poison = new WriteItem(null, null);
+                AtomicBoolean writerDead = new AtomicBoolean(false);
+                Thread drainer = new Thread(() -> {
+                    try (GraphRepository.MiningWriter writer = gr.openMiningWriter()) {
+                        for (;;) {
+                            WriteItem it = writeQ.take();
+                            if (it == poison) break;
+                            if (it.pom() != null) { writer.appendMined(it.pom()); mined.incrementAndGet(); }
+                            else { writer.appendMissing(it.missing()[0], it.missing()[1], it.missing()[2]); notFound.incrementAndGet(); }
                         }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } catch (Exception e) {
+                        log.error("graph mine writer failed: {}", e.getMessage(), e);
+                    } finally {
+                        writerDead.set(true);
                     }
-                    case OK -> {
-                        MinedPom mp = RawPomParser.parse(fetch.file());
-                        if (mp.ok()) {
-                            // Use the catalogue coordinates as the node identity (the POM may
-                            // inherit g/v from its parent; the worklist coordinates are exact).
-                            enqueue(writeQ, new WriteItem(withCoordinates(mp, w[0], w[1], w[2]), null), writerDead);
-                        } else {
-                            parseFailed.incrementAndGet(); // fetched but malformed — not 'missing'
+                }, "mine-writer");
+                drainer.start();
+
+                List<Future<?>> futures = new ArrayList<>(page.size());
+                for (String[] w : page) {
+                    futures.add(pool.submit(() -> {
+                        if (rateLimited.get() || writerDead.get()) return;
+                        if (limiter != null) {
+                            try { limiter.waitForPermission(); }
+                            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
                         }
-                    }
-                    case NOT_FOUND -> enqueue(writeQ, new WriteItem(null, new String[]{w[0], w[1], w[2]}), writerDead);
-                    case TRANSIENT -> transientErr.incrementAndGet();
+                        if (rateLimited.get() || writerDead.get()) return;
+                        String gav = w[0] + ":" + w[1] + ":" + w[2];
+                        progress.tick(gav);
+                        Resolver.PomFetch fetch = fetcher.fetch(gav);
+                        switch (fetch.outcome()) {
+                            case RATE_LIMITED -> {
+                                if (rateLimited.compareAndSet(false, true)) {
+                                    log.error("Maven Central returned 429 (rate limited) on {} — stopping to avoid overloading it.", gav);
+                                }
+                            }
+                            case OK -> {
+                                MinedPom mp = RawPomParser.parse(fetch.file());
+                                if (mp.ok()) {
+                                    // Use the catalogue coordinates as the node identity (the POM may
+                                    // inherit g/v from its parent; the worklist coordinates are exact).
+                                    enqueue(writeQ, new WriteItem(withCoordinates(mp, w[0], w[1], w[2]), null), writerDead);
+                                } else {
+                                    parseFailed.incrementAndGet(); // fetched but malformed — not 'missing'
+                                }
+                            }
+                            case NOT_FOUND -> enqueue(writeQ, new WriteItem(null, new String[]{w[0], w[1], w[2]}), writerDead);
+                            case TRANSIENT -> transientErr.incrementAndGet();
+                        }
+                    }));
                 }
-            }));
+                // Wait for this page's fetches, then signal the drainer and wait for its final
+                // flush/close before the next page opens a read connection.
+                for (Future<?> f : futures) {
+                    try { f.get(); } catch (Exception e) { log.warn("graph mine task failed: {}", e.getMessage()); }
+                }
+                try {
+                    while (drainer.isAlive() && !writeQ.offer(poison, 1, TimeUnit.SECONDS)) { /* writer busy; retry */ }
+                    drainer.join();
+                } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+                if (rateLimited.get()) break pages;
+            }
         }
         pool.shutdown();
-        for (Future<?> f : futures) {
-            try { f.get(); } catch (Exception e) { log.warn("graph mine task failed: {}", e.getMessage()); }
-        }
         try { pool.awaitTermination(1, TimeUnit.MINUTES); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        // All fetches done (or aborted): signal the drainer and wait for its final flush.
-        try {
-            while (drainer.isAlive() && !writeQ.offer(poison, 1, TimeUnit.SECONDS)) { /* writer busy; retry */ }
-            drainer.join();
-        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
 
         progress.done();
         if (rateLimited.get()) {

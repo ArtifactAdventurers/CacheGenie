@@ -150,8 +150,16 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   dependencyManagement, parent ref, properties, scm, developers, licenses) via
   `GraphRepository.MiningWriter` into the `pom_meta`/`direct_dep`/
   `dependency_management`/`pom_properties`/`pom_developers`/`pom_licenses` tables.
-  Worklist is `MetaRepository.selectVersionsToMine` (un-mined = no `pom_meta` row);
-  same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`. Parents
+  Worklist is un-mined versions (no `pom_meta` row). `--list` counts/previews via
+  `selectVersionsToMine`; a real run **streams** the worklist in bounded keyset pages
+  (`MetaRepository.selectVersionsToMineAfter`, ordered by `(gid,aid,version)`, cursor-paged
+  — `PAGE_SIZE=50_000`) so it runs in constant memory even on a full-Central backlog
+  (~14.8M versions) instead of materialising the whole list + every `Future` (the old path
+  OOM'd at task submission). One reused worker pool; per page a fresh drainer/`MiningWriter`
+  is opened *after* the page read closes its connection, so a reader and the writer are never
+  open against `graph.db` at once. `--limit` is a total budget across pages/selectors (still
+  useful for polite, resumable drips, not just to bound memory).
+  Same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`. Parents
   and BOMs are mined once as their own nodes, never re-downloaded per child.
   `resolve` (`GraphResolveCmd` → `PomResolver`) is the deferred resolution pass: it
   walks the mined parent chain + import BOMs to fill managed versions, interpolates

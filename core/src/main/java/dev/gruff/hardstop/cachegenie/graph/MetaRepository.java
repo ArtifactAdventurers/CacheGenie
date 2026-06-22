@@ -209,6 +209,63 @@ public class MetaRepository {
         return out;
     }
 
+    /**
+     * Like {@link #selectVersionsToMine}, but returns one <b>bounded page</b> of the worklist,
+     * ordered by {@code (gid, aid, version)} and starting strictly <em>after</em> the given
+     * keyset cursor (pass {@code after == null} for the first page). This lets {@code graph mine}
+     * stream a multi-million-row backlog in constant memory instead of materialising the whole
+     * worklist into one giant {@code List}.
+     *
+     * <p>Keyset (not OFFSET) pagination is essential here: as rows are mined they leave the
+     * worklist (the {@code NOT EXISTS} on {@code pom_meta}), so OFFSET would skip rows. The
+     * cursor moves strictly forward over {@code (gid, aid, version)} — already-mined rows are
+     * excluded by the predicate, and rows that failed this run sit behind the cursor so the run
+     * doesn't loop on them (a fresh run starts the cursor at {@code null} and retries them).
+     *
+     * @param after {@code {gid, aid, version}} of the last row of the previous page, or {@code null}.
+     * @param pageSize maximum rows to return (must be {@code > 0}).
+     */
+    public List<String[]> selectVersionsToMineAfter(String gid, String aid, String version,
+                                                    Instant since, String[] after, int pageSize) {
+        StringBuilder sql = new StringBuilder(
+                "SELECT a.gid, a.aid, v.version FROM meta_versions v " +
+                "JOIN meta_artifacts a ON a.id = v.ga_id " +
+                "WHERE (v.missing_pom IS NULL OR v.missing_pom = FALSE) " +
+                "AND NOT EXISTS (SELECT 1 FROM artifacts ar JOIN pom_meta pm ON pm.artifact_id = ar.id " +
+                "WHERE ar.gid = a.gid AND ar.aid = a.aid AND ar.version = v.version)");
+        List<String> params = new ArrayList<>();
+        if (gid != null) { sql.append(" AND a.gid = ?"); params.add(gid); }
+        if (aid != null) { sql.append(" AND a.aid = ?"); params.add(aid); }
+        if (version != null) { sql.append(" AND v.version = ?"); params.add(version); }
+        if (since != null) { sql.append(" AND v.published IS NOT NULL AND v.published >= ?"); params.add(since.toString()); }
+        if (after != null) {
+            // Lexicographic keyset predicate over (gid, aid, version), spelled out so it works
+            // regardless of DuckDB row-comparison support.
+            sql.append(" AND (a.gid > ?")
+               .append(" OR (a.gid = ? AND a.aid > ?)")
+               .append(" OR (a.gid = ? AND a.aid = ? AND v.version > ?))");
+            params.add(after[0]);
+            params.add(after[0]); params.add(after[1]);
+            params.add(after[0]); params.add(after[1]); params.add(after[2]);
+        }
+        sql.append(" ORDER BY a.gid, a.aid, v.version");
+        sql.append(" LIMIT ").append(Math.max(1, pageSize)); // bounded page
+
+        List<String[]> out = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new String[]{rs.getString(1), rs.getString(2), rs.getString(3)});
+                }
+            }
+        } catch (SQLException e) {
+            log.error("selectVersionsToMineAfter failed", e);
+        }
+        return out;
+    }
+
     /** Count the {@link #selectVersionsToMine} worklist without materialising it (cheap {@code COUNT(*)}). */
     public long countVersionsToMine(String gid, String aid, String version, Instant since) {
         StringBuilder sql = new StringBuilder(
