@@ -26,6 +26,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Mine the <em>raw</em> POM for each catalogue version that hasn't been mined yet.
@@ -168,8 +169,33 @@ public class GraphMineCmd implements Runnable {
         // and thread-safe, so one shared instance serves all workers.
         PomFetcher fetcher = new PomFetcher(cg.repoRoot(), cg.base());
         AtomicLong mined = new AtomicLong(), notFound = new AtomicLong(),
-                transientErr = new AtomicLong(), parseFailed = new AtomicLong();
-        AtomicBoolean rateLimited = new AtomicBoolean(false);
+                transientErr = new AtomicLong(), parseFailed = new AtomicLong(),
+                // Unexpected (unchecked) exceptions escaping a fetch/parse/enqueue. Previously
+                // these killed the worker task and incremented NOTHING, so 'visited' climbed
+                // while every outcome counter sat still (an invisible counting hole). Counting
+                // them keeps visited == mined+missing+transient+bad+errors and surfaces the
+                // problem live instead of only as a WARN buried in the log.
+                errors = new AtomicLong();
+        // Single run-stop signal, tripped either by a 429 (politeness) or by the
+        // systemic-failure circuit breaker below. abortReason carries the message to
+        // print at the end so the two causes aren't conflated.
+        AtomicBoolean aborted = new AtomicBoolean(false);
+        AtomicReference<String> abortReason = new AtomicReference<>();
+        // Circuit breaker: consecutive transient failures with no intervening success.
+        // A systemic fault (wrong/unreachable -r endpoint, no network egress, HTTP/2
+        // stream exhaustion, a 5xx wall) fails essentially every fetch in a row; a
+        // healthy crawl resets this on each OK/NOT_FOUND. Crossing the threshold means
+        // the run is broken, not flaky, so we stop fast instead of burning an hour
+        // mislabelling millions of versions 'transient'. A false trip (e.g. a brief
+        // upstream blip) is cheap — progress is saved and a re-run resumes — so we bias
+        // toward stopping.
+        AtomicLong consecutiveTransient = new AtomicLong();
+        final long TRANSIENT_ABORT_STREAK = 500;
+        // Surface the live outcome breakdown on every progress line (not just the final
+        // summary) so a run that is mostly transient failures — e.g. throttling/5xx —
+        // is obvious in real time instead of after it finishes.
+        progress.stats(() -> String.format("[mined %d, missing %d, transient %d, bad %d, errors %d]",
+                mined.get(), notFound.get(), transientErr.get(), parseFailed.get(), errors.get()));
 
         // One worker pool, reused across all pages (it touches no DB — only fetch+parse).
         ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, threads));
@@ -179,7 +205,7 @@ public class GraphMineCmd implements Runnable {
         pages:
         for (String[] sel : selectors) {
             String[] cursor = null; // keyset over (gid, aid, version)
-            while (!rateLimited.get() && processed < budget) {
+            while (!aborted.get() && processed < budget) {
                 int pageLimit = (int) Math.min(PAGE_SIZE, budget - processed);
                 List<String[]> page =
                         metaRepo.selectVersionsToMineAfter(sel[0], sel[1], sel[2], cutoff, cursor, pageLimit);
@@ -207,6 +233,14 @@ public class GraphMineCmd implements Runnable {
                         Thread.currentThread().interrupt();
                     } catch (Exception e) {
                         log.error("graph mine writer failed: {}", e.getMessage(), e);
+                        // A dead writer means we can no longer persist anything: without this,
+                        // enqueue() silently drops every subsequent POM while the run sails on
+                        // (visited climbing, mined frozen). Trip the shared stop signal so the
+                        // run aborts loudly instead of mining nothing for hours.
+                        if (aborted.compareAndSet(false, true)) {
+                            abortReason.set("the DuckDB writer thread failed (" + e.getMessage()
+                                    + ") — stopped so we don't keep fetching while persisting nothing.");
+                        }
                     } finally {
                         writerDead.set(true);
                     }
@@ -216,22 +250,25 @@ public class GraphMineCmd implements Runnable {
                 List<Future<?>> futures = new ArrayList<>(page.size());
                 for (String[] w : page) {
                     futures.add(pool.submit(() -> {
-                        if (rateLimited.get() || writerDead.get()) return;
+                      try {
+                        if (aborted.get() || writerDead.get()) return;
                         if (limiter != null) {
                             try { limiter.waitForPermission(); }
                             catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
                         }
-                        if (rateLimited.get() || writerDead.get()) return;
+                        if (aborted.get() || writerDead.get()) return;
                         String gav = w[0] + ":" + w[1] + ":" + w[2];
                         progress.tick(gav);
                         Resolver.PomFetch fetch = fetcher.fetch(gav);
                         switch (fetch.outcome()) {
                             case RATE_LIMITED -> {
-                                if (rateLimited.compareAndSet(false, true)) {
+                                if (aborted.compareAndSet(false, true)) {
+                                    abortReason.set("Maven Central rate-limited us (HTTP 429). Stopped to avoid overloading it.");
                                     log.error("Maven Central returned 429 (rate limited) on {} — stopping to avoid overloading it.", gav);
                                 }
                             }
                             case OK -> {
+                                consecutiveTransient.set(0); // a 200 (even if malformed) proves the pipe works
                                 MinedPom mp = RawPomParser.parse(fetch.file());
                                 if (mp.ok()) {
                                     // Use the catalogue coordinates as the node identity (the POM may
@@ -241,9 +278,41 @@ public class GraphMineCmd implements Runnable {
                                     parseFailed.incrementAndGet(); // fetched but malformed — not 'missing'
                                 }
                             }
-                            case NOT_FOUND -> enqueue(writeQ, new WriteItem(null, new String[]{w[0], w[1], w[2]}), writerDead);
-                            case TRANSIENT -> transientErr.incrementAndGet();
+                            case NOT_FOUND -> {
+                                consecutiveTransient.set(0); // a definitive 404 also proves the pipe works
+                                enqueue(writeQ, new WriteItem(null, new String[]{w[0], w[1], w[2]}), writerDead);
+                            }
+                            case TRANSIENT -> {
+                                transientErr.incrementAndGet();
+                                // Trip the breaker on a sustained run of failures with no success
+                                // between them — that's a systemic fault, not flakiness.
+                                if (consecutiveTransient.incrementAndGet() >= TRANSIENT_ABORT_STREAK
+                                        && aborted.compareAndSet(false, true)) {
+                                    abortReason.set(TRANSIENT_ABORT_STREAK + "+ consecutive fetches failed transiently with no "
+                                            + "success in between — the run looks systemically broken (check -r endpoint, network "
+                                            + "egress, and HTTP protocol), not flaky.");
+                                    log.error("Aborting: {}+ consecutive transient POM-fetch failures (last: {}) — systemic failure, "
+                                            + "not flakiness. Re-run -l debug to see the underlying fetch error.", TRANSIENT_ABORT_STREAK, gav);
+                                }
+                            }
                         }
+                      } catch (Exception t) {
+                        // No worker may die uncounted: an unchecked exception in fetch/parse/
+                        // enqueue used to vanish (visited ticked, no outcome recorded), so the
+                        // whole breakdown stalled while the run sailed on. Count it, log the
+                        // coordinates + cause, and feed the same systemic-failure breaker so a
+                        // run that is mostly unexpected errors aborts instead of mining nothing.
+                        errors.incrementAndGet();
+                        log.warn("graph mine task error on {}:{}:{}: {}", w[0], w[1], w[2], t.toString());
+                        if (consecutiveTransient.incrementAndGet() >= TRANSIENT_ABORT_STREAK
+                                && aborted.compareAndSet(false, true)) {
+                            abortReason.set(TRANSIENT_ABORT_STREAK + "+ consecutive failures (transient or unexpected "
+                                    + "errors) with no success in between — the run looks systemically broken; check the "
+                                    + "logged task errors.");
+                            log.error("Aborting: {}+ consecutive failures with no success (last error on {}:{}:{}) — "
+                                    + "systemic, not flakiness.", TRANSIENT_ABORT_STREAK, w[0], w[1], w[2]);
+                        }
+                      }
                     }));
                 }
                 // Wait for this page's fetches, then signal the drainer and wait for its final
@@ -256,21 +325,21 @@ public class GraphMineCmd implements Runnable {
                     drainer.join();
                 } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
 
-                if (rateLimited.get()) break pages;
+                if (aborted.get()) break pages;
             }
         }
         pool.shutdown();
         try { pool.awaitTermination(1, TimeUnit.MINUTES); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
 
         progress.done();
-        if (rateLimited.get()) {
-            System.err.println("ABORTED: Maven Central rate-limited us (HTTP 429). Stopped to avoid overloading it — progress so far is saved; re-run later to continue.");
-            System.out.printf("Before stopping: %d mined, %d not-found (marked missing), %d transient (will retry), %d malformed%n",
-                    mined.get(), notFound.get(), transientErr.get(), parseFailed.get());
+        if (aborted.get()) {
+            System.err.println("ABORTED: " + abortReason.get() + " Progress so far is saved; fix the cause and re-run to continue.");
+            System.out.printf("Before stopping: %d mined, %d not-found (marked missing), %d transient (will retry), %d malformed, %d errors%n",
+                    mined.get(), notFound.get(), transientErr.get(), parseFailed.get(), errors.get());
             System.exit(1);
         }
-        System.out.printf("Graph mine complete: %d POMs mined; %d not-found (marked missing), %d transient (skipped, will retry), %d malformed%n",
-                mined.get(), notFound.get(), transientErr.get(), parseFailed.get());
+        System.out.printf("Graph mine complete: %d POMs mined; %d not-found (marked missing), %d transient (skipped, will retry), %d malformed, %d errors%n",
+                mined.get(), notFound.get(), transientErr.get(), parseFailed.get(), errors.get());
         System.out.println("Mined into " + new File(cg.cacheGenieRoot(), "graph.db").getAbsolutePath() + " — run 'graph resolve' to build the effective graph.");
         System.exit(0);
     }

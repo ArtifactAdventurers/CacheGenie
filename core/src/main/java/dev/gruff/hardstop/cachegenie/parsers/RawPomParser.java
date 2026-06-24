@@ -224,7 +224,19 @@ public final class RawPomParser {
 
     private static DocumentBuilder newBuilder() {
         try {
-            DocumentBuilder b = DocumentBuilderFactory.newInstance().newDocumentBuilder();
+            DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
+            // Never reach out for external DTDs/entities. Some POMs carry a DOCTYPE or a
+            // SYSTEM entity (e.g. activemq's locator.ent); loading it off disk fails with
+            // "No such file or directory" and the POM is counted 'bad'. We don't need a DTD
+            // to read a POM, and fetching external resources during a mass crawl is both an
+            // XXE security risk and a needless I/O failure — so disable it outright. This
+            // hardens the parser and recovers the POMs that previously failed only on the
+            // unresolvable external reference.
+            f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+            f.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            f.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            f.setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            DocumentBuilder b = f.newDocumentBuilder();
             b.setErrorHandler(new org.xml.sax.ErrorHandler() {
                 @Override public void warning(SAXParseException e) { /* ignore */ }
                 @Override public void error(SAXParseException e) throws SAXParseException { throw e; }

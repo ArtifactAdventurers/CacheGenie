@@ -1,6 +1,7 @@
 package dev.gruff.hardstop.cachegenie.utils;
 
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * Lightweight, opt-in progress reporter for long-running commands.
@@ -57,6 +58,13 @@ public final class Progress {
     private final AtomicLong lastReportMillis = new AtomicLong(startMillis);
     /** Total expected items; when > 0, progress lines include count/total and an ETA. */
     private volatile long total = -1;
+    /**
+     * Optional running-stats provider. When set, its value (e.g. a live outcome
+     * breakdown) is appended to every emitted progress line and the final summary,
+     * so callers can surface success/failure ratios in real time rather than only
+     * at the end. Kept generic here so any long-running command can supply one.
+     */
+    private volatile Supplier<String> stats;
 
     private Progress(String label, long everyN, long everyMillis) {
         this.label = label;
@@ -67,6 +75,16 @@ public final class Progress {
     /** Set the total expected item count so progress lines can show {@code n/total} and an ETA. */
     public void total(long total) {
         this.total = total;
+    }
+
+    /**
+     * Provide a running-stats string to append to each progress line and the final
+     * summary (e.g. {@code "[ok 67829 missing 155 transient 3067053 bad 388]"}).
+     * The supplier is called on the reporting thread only when a line is emitted,
+     * so it is cheap to leave installed in a hot loop. Pass {@code null} to clear.
+     */
+    public void stats(Supplier<String> stats) {
+        this.stats = stats;
     }
 
     public void tick() {
@@ -93,8 +111,9 @@ public final class Progress {
     public void done() {
         if (!enabled) return;
         long secs = elapsedSeconds();
-        System.err.printf("[progress] %s: done — %d items in %ds (%d/s)%n",
+        String line = String.format("[progress] %s: done — %d items in %ds (%d/s)",
                 label, count.get(), secs, rate(count.get(), secs));
+        System.err.println(line + statsSuffix());
     }
 
     private void emit(long n, String detail) {
@@ -106,11 +125,16 @@ public final class Progress {
         } else {
             head = String.format("[progress] %s: %d processed (%d/s)", label, n, rate(n, secs));
         }
-        if (detail == null || detail.isEmpty()) {
-            System.err.println(head);
-        } else {
-            System.err.println(head + " — " + detail);
-        }
+        String body = (detail == null || detail.isEmpty()) ? head : head + " — " + detail;
+        System.err.println(body + statsSuffix());
+    }
+
+    /** Render the running-stats suffix (leading space) if a provider is installed and non-empty. */
+    private String statsSuffix() {
+        Supplier<String> s = stats;
+        if (s == null) return "";
+        String v = s.get();
+        return (v == null || v.isEmpty()) ? "" : " " + v;
     }
 
     /** Estimated time remaining based on the average rate so far. */

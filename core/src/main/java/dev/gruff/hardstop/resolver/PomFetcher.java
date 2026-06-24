@@ -50,9 +50,16 @@ public final class PomFetcher {
         String b = remoteBase.toASCIIString();
         this.base = b.endsWith("/") ? b : b + "/";
         this.http = HttpClient.newBuilder()
-                // Prefer HTTP/2 (request multiplexing over a shared connection); the
-                // client transparently falls back to HTTP/1.1 with keep-alive otherwise.
-                .version(HttpClient.Version.HTTP_2)
+                // Force HTTP/1.1, NOT HTTP/2. The JDK HttpClient multiplexes all HTTP/2
+                // requests onto a SINGLE connection per origin and will not open a second
+                // one; once in-flight requests exceed the server's advertised
+                // SETTINGS_MAX_CONCURRENT_STREAMS it throws "too many concurrent streams"
+                // rather than queueing. With a large --threads pool against one origin
+                // (Maven Central / a mirror) that fails the vast majority of fetches —
+                // which we then mis-count as TRANSIENT. HTTP/1.1 instead pools multiple
+                // keep-alive connections (one request each), so throughput scales with
+                // the worker count and there is no per-connection stream cap.
+                .version(HttpClient.Version.HTTP_1_1)
                 // Follow redirects manually below: the JDK client won't downgrade
                 // https->http, and we want to honour cross-scheme mirror redirects.
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -74,6 +81,16 @@ public final class PomFetcher {
     public Resolver.PomFetch fetch(String gav) {
         String[] p = gav.split(":");
         if (p.length < 3) return new Resolver.PomFetch(Resolver.ResolveOutcome.NOT_FOUND, null);
+        // Unresolved Maven property placeholders (e.g. ${revision}, ${VERSION}, ${project.version})
+        // leak into the catalogue as literal coordinate text. They are not real artifacts, and the
+        // characters $ { } are illegal in a URL path — URI.create() would throw an unchecked
+        // IllegalArgumentException that escapes download()'s IOException-only catch and kills the
+        // worker task uncounted (visited ticks up, no outcome recorded). Treat them as permanently
+        // NOT_FOUND so they're marked missing_pom and skipped on future runs instead of retried forever.
+        if (hasUnresolvedPlaceholder(p[0]) || hasUnresolvedPlaceholder(p[1]) || hasUnresolvedPlaceholder(p[2])) {
+            log.debug("POM fetch {} skipped — unresolved property placeholder in coordinates", gav);
+            return new Resolver.PomFetch(Resolver.ResolveOutcome.NOT_FOUND, null);
+        }
         String rel = pomPath(p[0], p[1], p[2]);
 
         File local = new File(localRoot, rel);
@@ -137,7 +154,18 @@ public final class PomFetcher {
             Thread.currentThread().interrupt();
             log.debug("POM fetch {} interrupted", gav);
             return new Resolver.PomFetch(Resolver.ResolveOutcome.TRANSIENT, null);
+        } catch (IllegalArgumentException e) {
+            // Malformed URL/coordinate (e.g. illegal path characters) — not a real, fetchable
+            // artifact and never will be. Classify NOT_FOUND so it's marked missing and not
+            // retried, and so an unchecked exception can never kill a worker task uncounted.
+            log.debug("POM fetch {} skipped — malformed URL: {}", gav, e.getMessage());
+            return new Resolver.PomFetch(Resolver.ResolveOutcome.NOT_FOUND, null);
         }
+    }
+
+    /** True if a coordinate still contains an unresolved Maven property placeholder ({@code ${...}}). */
+    private static boolean hasUnresolvedPlaceholder(String s) {
+        return s != null && (s.indexOf('$') >= 0 || s.indexOf('{') >= 0 || s.indexOf('}') >= 0);
     }
 
     /** 301/302/303/307/308 — all the redirect statuses we follow (any → GET is fine for a POM). */

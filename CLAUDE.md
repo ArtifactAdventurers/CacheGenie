@@ -161,6 +161,13 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   useful for polite, resumable drips, not just to bound memory).
   Same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`. Parents
   and BOMs are mined once as their own nodes, never re-downloaded per child.
+  `PomFetcher`'s shared `HttpClient` uses **HTTP/1.1 deliberately** (not HTTP/2): the
+  JDK client multiplexes all HTTP/2 requests onto one connection per origin and throws
+  `too many concurrent streams` once `--threads` exceeds the server's stream cap — HTTP/1.1
+  pools multiple connections instead, so don't "upgrade" it. Beyond the 429 abort, `mine`
+  also has a **systemic-failure circuit breaker**: `TRANSIENT_ABORT_STREAK` (500) consecutive
+  transient failures with no intervening success aborts the run (shared `aborted`/`abortReason`
+  stop signal) so a broken endpoint/network doesn't burn the whole worklist as `transient`.
   `resolve` (`GraphResolveCmd` → `PomResolver`) is the deferred resolution pass: it
   walks the mined parent chain + import BOMs to fill managed versions, interpolates
   `${...}` properties, and projects resolvable direct edges into the concrete
