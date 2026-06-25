@@ -184,22 +184,33 @@ public class IndexerSyncAction {
         }
 
         long newVersions = 0;
-        java.util.Set<String> touched = new java.util.HashSet<>();
-        try (MetaRepository.IndexSyncWriter w = repo.openIndexSync()) {
-            for (Main m : mains.values()) {
-                if (w.addVersion(m.g, m.a, m.v, m.published, m.packaging, m.ext, m.size, m.sha1, m.sha256, m.hasSources, m.hasJavadoc)) {
-                    newVersions++;
+        // Apply the ADDs through the same set-based staging merge the full bootstrap
+        // uses, NOT the per-row IndexSyncWriter. An "incremental" chunk is usually
+        // tiny, but a post-gap catch-up (or a large index publish) can carry hundreds
+        // of thousands of records — and the row-by-row path does one
+        // `SELECT id FROM meta_artifacts WHERE gid=? AND aid=?` point lookup per
+        // distinct artifact, which DuckDB serves by full table scan (O(N) scans of a
+        // multi-million-row table), pegging a core for hours with no output. Staging +
+        // one merge collapses that to a handful of bulk set-based statements.
+        if (!mains.isEmpty()) {
+            System.out.printf("Merging %d staged version(s) (set-based)…%n", mains.size());
+            try (MetaRepository.IndexStageLoader loader = repo.openIndexStage()) {
+                for (Main m : mains.values()) {
+                    loader.append(m.g, m.a, m.v, m.packaging, m.ext, m.size, m.sha1, m.sha256, m.hasSources, m.hasJavadoc, m.published);
                 }
-                touched.add(m.g + " " + m.a);
+                long[] merged = loader.merge();
+                newVersions = merged[1];
             }
-            for (String[] rm : removes) {
-                w.removeVersion(rm[0], rm[1], rm[2]);
-                touched.add(rm[0] + " " + rm[1]);
-            }
-            // Refresh generated/latest/release for each artifact we touched.
-            for (String key : touched) {
-                int nul = key.indexOf(' ');
-                w.refreshSummary(key.substring(0, nul), key.substring(nul + 1));
+        }
+        // Removals (ARTIFACT_REMOVE) are typically few; apply them row-by-row, then
+        // refresh the affected artifacts' latest/release in one set-based pass.
+        if (!removes.isEmpty()) {
+            System.out.printf("Applying %d removal(s) and refreshing summaries (set-based)…%n", removes.size());
+            try (MetaRepository.IndexSyncWriter w = repo.openIndexSync()) {
+                for (String[] rm : removes) {
+                    w.removeVersion(rm[0], rm[1], rm[2]);
+                }
+                w.refreshSummaries();
             }
         }
         System.out.printf(

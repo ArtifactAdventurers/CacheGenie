@@ -389,8 +389,11 @@ public class MetaRepository {
         private final PreparedStatement insArtifact;
         private final PreparedStatement insVersion;
         private final PreparedStatement delVersion;
-        private final PreparedStatement updSummary;
         private final Map<String, Integer> idCache = new HashMap<>();
+        // Distinct meta_artifacts ids touched by this sync (adds + removes). Their
+        // generated/latest/release rows are recomputed in one set-based pass at the
+        // end (refreshSummaries) instead of per-artifact.
+        private final Set<Integer> touchedGaIds = new HashSet<>();
         private int sinceCommit = 0;
 
         private IndexSyncWriter() throws SQLException {
@@ -404,14 +407,6 @@ public class MetaRepository {
                     "file_size, sha1, sha256, has_sources, has_javadoc) " +
                     "VALUES (?, ?, ?, false, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (ga_id, version) DO NOTHING");
             delVersion = conn.prepareStatement("DELETE FROM meta_versions WHERE ga_id = ? AND version = ?");
-            // Refresh generated/latest/release for one artifact (latest = newest by publish date).
-            updSummary = conn.prepareStatement(
-                    "UPDATE meta_artifacts SET generated = ?, " +
-                    "latest = (SELECT arg_max(version, published) FROM meta_versions WHERE ga_id = ?), " +
-                    "release = COALESCE(" +
-                    "  (SELECT arg_max(version, published) FILTER (WHERE version NOT LIKE '%-SNAPSHOT') FROM meta_versions WHERE ga_id = ?), " +
-                    "  (SELECT arg_max(version, published) FROM meta_versions WHERE ga_id = ?)) " +
-                    "WHERE id = ?");
         }
 
         // SELECT-then-INSERT (cached): we only INSERT when truly absent, so no
@@ -444,6 +439,7 @@ public class MetaRepository {
             if (gid == null || aid == null || version == null) return false;
             try {
                 int gaId = artifactId(gid, aid);
+                touchedGaIds.add(gaId);
                 insVersion.setInt(1, gaId);
                 insVersion.setString(2, version);
                 insVersion.setString(3, fileModifiedMillis != null ? Instant.ofEpochMilli(fileModifiedMillis).toString() : null);
@@ -463,20 +459,50 @@ public class MetaRepository {
             }
         }
 
-        /** Refresh one artifact's generated/latest/release after adding versions. */
-        public void refreshSummary(String gid, String aid) {
-            if (gid == null || aid == null) return;
+        /**
+         * Recompute generated/latest/release for every artifact touched by this sync
+         * in ONE set-based pass. The previous per-artifact version ran three
+         * {@code arg_max} subqueries over {@code meta_versions WHERE ga_id = ?} each
+         * call; with no standalone index on {@code ga_id} that degrades to a full scan
+         * of the (multi-million-row) table per subquery, so a large incremental chunk
+         * touching tens of thousands of artifacts churned silently for hours. This
+         * stages the touched ids and does a single grouped aggregate over
+         * {@code meta_versions} — one pass total — mirroring the full-sync merge.
+         * Call once, after all addVersion/removeVersion calls.
+         */
+        public void refreshSummaries() {
+            if (touchedGaIds.isEmpty()) return;
             try {
-                int gaId = artifactId(gid, aid);
-                updSummary.setString(1, Instant.now().toString());
-                updSummary.setInt(2, gaId);
-                updSummary.setInt(3, gaId);
-                updSummary.setInt(4, gaId);
-                updSummary.setInt(5, gaId);
-                updSummary.executeUpdate();
-                maybeCommit();
+                try (Statement st = conn.createStatement()) {
+                    st.execute("CREATE TEMP TABLE IF NOT EXISTS idx_touched (ga_id INTEGER)");
+                    st.execute("DELETE FROM idx_touched");
+                }
+                try (PreparedStatement ins = conn.prepareStatement("INSERT INTO idx_touched VALUES (?)")) {
+                    for (Integer gaId : touchedGaIds) {
+                        ins.setInt(1, gaId);
+                        ins.addBatch();
+                    }
+                    ins.executeBatch();
+                }
+                try (Statement st = conn.createStatement()) {
+                    st.execute(
+                            "UPDATE meta_artifacts AS a SET " +
+                            "generated = '" + Instant.now() + "', " +
+                            "latest = sub.latest, " +
+                            "release = COALESCE(sub.release, sub.latest) " +
+                            "FROM (" +
+                            "  SELECT v.ga_id AS ga_id, " +
+                            "         arg_max(v.version, v.published) AS latest, " +
+                            "         arg_max(v.version, v.published) FILTER (WHERE v.version NOT LIKE '%-SNAPSHOT') AS release " +
+                            "  FROM meta_versions v " +
+                            "  WHERE v.ga_id IN (SELECT ga_id FROM idx_touched) " +
+                            "  GROUP BY v.ga_id" +
+                            ") AS sub WHERE a.id = sub.ga_id");
+                    st.execute("DROP TABLE IF EXISTS idx_touched");
+                }
+                conn.commit();
             } catch (SQLException e) {
-                log.error("index-sync summary refresh {}:{} failed", gid, aid, e);
+                log.error("index-sync set-based summary refresh failed ({} artifacts touched)", touchedGaIds.size(), e);
             }
         }
 
@@ -485,6 +511,7 @@ public class MetaRepository {
             if (gid == null || aid == null || version == null) return;
             try {
                 int gaId = artifactId(gid, aid);
+                touchedGaIds.add(gaId);
                 delVersion.setInt(1, gaId);
                 delVersion.setString(2, version);
                 delVersion.executeUpdate();
@@ -504,7 +531,7 @@ public class MetaRepository {
         @Override
         public void close() {
             try { conn.commit(); } catch (SQLException e) { log.error("final index-sync commit failed", e); }
-            for (PreparedStatement ps : new PreparedStatement[]{selArtifact, insArtifact, insVersion, delVersion, updSummary}) {
+            for (PreparedStatement ps : new PreparedStatement[]{selArtifact, insArtifact, insVersion, delVersion}) {
                 try { if (ps != null) ps.close(); } catch (SQLException ignore) { /* ignore */ }
             }
             try { conn.close(); } catch (SQLException e) { log.error("closing index-sync connection failed", e); }
@@ -517,8 +544,11 @@ public class MetaRepository {
      * table via DuckDB's {@code Appender}, then merged set-based: collapsed to
      * distinct versions once, new artifacts bulk-created, versions bulk-inserted.
      * This avoids the ~100M per-row {@code ON CONFLICT} index probes that made the
-     * row-by-row path take a day. Use only for full pulls (incremental updates,
-     * which also carry removals, use {@link IndexSyncWriter}).
+     * row-by-row path take a day. Used for the full bootstrap and for the ADD records
+     * of an incremental sync (a large catch-up chunk would otherwise do one
+     * {@code SELECT id FROM meta_artifacts} point lookup per artifact, which DuckDB
+     * serves by full scan). Incremental removals (ARTIFACT_REMOVE) are applied
+     * separately via {@link IndexSyncWriter}.
      *
      * <p>Note: the staging table lives in {@code graph.db} and so grows the file
      * for the duration; run {@code db compact --rewrite} afterwards to reclaim it.
@@ -789,6 +819,62 @@ public class MetaRepository {
             log.error("Failed to load all meta", e);
         }
         return out;
+    }
+
+    /** One artifact's catalogue data needed to synthesise a {@code maven-metadata.xml}. */
+    public record ArtifactMetadata(String gid, String aid, String latest, String release, List<String> versions) {}
+
+    /**
+     * Stream every catalogued artifact and its versions to {@code sink}, one call per
+     * {@code (groupId, artifactId)}, with {@code versions} ordered by publish date
+     * ascending — a best-effort proxy for Maven Central's deployment order (the order
+     * Central lists them in; it is NOT a semantic version sort, and Aether re-sorts
+     * internally when resolving ranges, so the order is cosmetic for resolution).
+     *
+     * <p>Backed by a single ordered join over {@code meta_artifacts}/{@code meta_versions};
+     * DuckDB does the (potentially disk-spilling) sort and rows are grouped on the client,
+     * so heap stays bounded to one artifact's version list regardless of catalogue size
+     * (no full materialisation, unlike {@link #loadAll()}). {@code gidFilter}/{@code aidFilter}
+     * may be null to scope to a group, a group+artifact, or the whole catalogue.
+     */
+    public void streamArtifactMetadata(String gidFilter, String aidFilter,
+                                       java.util.function.Consumer<ArtifactMetadata> sink) {
+        StringBuilder sql = new StringBuilder(
+                "SELECT a.gid AS gid, a.aid AS aid, a.latest AS latest, a.release AS release, v.version AS version " +
+                "FROM meta_artifacts a JOIN meta_versions v ON a.id = v.ga_id ");
+        List<String> conds = new ArrayList<>();
+        if (gidFilter != null) conds.add("a.gid = ?");
+        if (aidFilter != null) conds.add("a.aid = ?");
+        if (!conds.isEmpty()) sql.append("WHERE ").append(String.join(" AND ", conds)).append(' ');
+        sql.append("ORDER BY a.gid, a.aid, v.published NULLS LAST, v.version");
+
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            if (gidFilter != null) ps.setString(idx++, gidFilter);
+            if (aidFilter != null) ps.setString(idx, aidFilter);
+            try (ResultSet rs = ps.executeQuery()) {
+                String curG = null, curA = null, latest = null, release = null;
+                List<String> versions = new ArrayList<>();
+                while (rs.next()) {
+                    String g = rs.getString("gid");
+                    String a = rs.getString("aid");
+                    if (curG == null || !g.equals(curG) || !a.equals(curA)) {
+                        if (curG != null) sink.accept(new ArtifactMetadata(curG, curA, latest, release, versions));
+                        curG = g; curA = a;
+                        latest = rs.getString("latest");
+                        release = rs.getString("release");
+                        versions = new ArrayList<>();
+                    }
+                    String v = rs.getString("version");
+                    if (v != null) versions.add(v);
+                }
+                if (curG != null) sink.accept(new ArtifactMetadata(curG, curA, latest, release, versions));
+            }
+        } catch (SQLException e) {
+            log.error("streamArtifactMetadata failed", e);
+            throw new RuntimeException("streamArtifactMetadata failed: " + e.getMessage(), e);
+        }
     }
 
     private MavenMetaData readMeta(Connection conn, ResultSet rs, String gid, String aid) throws SQLException {

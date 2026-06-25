@@ -82,6 +82,18 @@ meta [-u] [-gav <gav>...]
 -   `-gav, --gav <gav>`: One or more `group:artifact:version` strings to filter the meta-scan.
 -   `-u, --update`: Force a retry for downloading POM files that were previously marked as missing.
 
+#### `metadata` (alias: `gen-metadata`)
+Synthesises `maven-metadata.xml` files into the local Maven repository (`~/.m2/repository`) straight from the discovery catalogue — **no network**. `graph mine` fetches only `.pom` files, so the local repo has POMs but no version metadata, which an *offline* resolve needs to handle version ranges and `LATEST`/`RELEASE`. This rebuilds that metadata from data `index-sync` already holds.
+
+```bash
+metadata [-gav <group[:artifact]>] [--repo-id <id>] [--also-plain]
+```
+-   `-gav, --gav <selector>`: `group` or `group:artifact` to scope to; omit for the whole catalogue.
+-   `--repo-id <id>`: id used in the filename `maven-metadata-<id>.xml` (default `central`, matching the resolver's remote repository so the offline `SimpleLocalRepositoryManager` finds it).
+-   `--also-plain`: also write plain `maven-metadata.xml` alongside.
+
+Functionally equivalent to Central's metadata for resolution, but not a byte-for-byte copy: `<lastUpdated>` is stamped now and `<versions>` is written in best-effort publish-date order (cosmetic — Aether re-sorts internally). See "Offline resolution from local POMs" in `MINING.md`.
+
 #### `cache` (alias: `hydrate`, `fill`)
 Downloads and caches specific artifacts into the local Maven cache.
 

@@ -97,6 +97,39 @@ java -jar target/cachegenie.jar db optimize        # indexes + ANALYZE
 java -jar target/cachegenie.jar graph push-neo4j --uri bolt://localhost:7687 --user neo4j --password
 ```
 
+## Offline resolution from local POMs
+
+`mine` saves every fetched `.pom` into `~/.m2/repository`, so once you've mined a
+slice you already hold the POMs locally. With one extra step you can resolve
+dependency graphs for those artifacts **offline** — no further Maven Central traffic
+— and at full Maven-model fidelity (version ranges, profiles, exclusions, relocation,
+managed versions), which the SQL `graph resolve` pass deliberately does not do.
+
+The one gap: `mine` fetches only `.pom`, never `maven-metadata.xml`, and an offline
+resolve needs that to pick a version for a range or `LATEST`/`RELEASE`. CacheGenie
+already knows every version from `index-sync`, so synthesise the metadata from the
+catalogue instead of re-downloading it:
+
+```bash
+java -jar target/cachegenie.jar graph mine --since 30d --rate 600   # POMs -> local repo + raw tables
+java -jar target/cachegenie.jar graph resolve                        # raw POMs -> concrete edges (SQL)
+java -jar target/cachegenie.jar metadata                             # catalogue -> maven-metadata.xml in local repo (no network)
+```
+
+After `metadata`, the local repo has both POMs and version metadata, so an offline
+resolve has everything it needs. The files are written as
+`maven-metadata-<repo-id>.xml` (default id `central`) to match how the resolver's
+`SimpleLocalRepositoryManager` looks up cached remote metadata; scope with
+`-gav <group[:artifact]>` or run unscoped for the whole catalogue. The result is
+functionally equivalent to Central's metadata for resolution, not a byte-for-byte
+copy (`<lastUpdated>` and exact version ordering differ — both cosmetic, since Aether
+re-sorts versions with its own comparator).
+
+> Verify the filename once for your resolver before doing the whole catalogue:
+> generate metadata for a single artifact that uses a version-range dependency and
+> confirm an offline resolve picks a version. Use `--repo-id` if your remote uses a
+> different id, or `--also-plain` to additionally emit plain `maven-metadata.xml`.
+
 ## Even gentler options
 
 - A local caching proxy (Nexus/Artifactory) as `-r` is Sonatype's recommended

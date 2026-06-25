@@ -195,12 +195,27 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
 - `compare` — API comparison between artifact versions.
 - `db` — manage the DuckDB graph database. Subcommands: `compact` (CHECKPOINT +
   VACUUM to reclaim space), `optimize` (secondary indexes on `artifacts(gid,aid)`,
-  `dependencies(child_id)`, `meta_artifacts(gid,aid)` + `ANALYZE`), `views`
+  `dependencies(child_id)`, `meta_artifacts(gid,aid)`, `meta_versions(ga_id)` +
+  the POM-mining coord indexes + `ANALYZE`), `views`
   (create the `gav`, `dependents`, `version_ranges` convenience views), and
   `export` (`COPY` tables + `version_ranges` to parquet/csv/json via
   `-f/--format`, `-o/--out`). Implemented in `actions/DBAction.java`. (Replaced
   the old `.properties`→CSV dumper.)
 - `meta-csv` — dump all discovery metadata to a CSV (reads `MetaRepository`).
+- `metadata` (`gen-metadata`) — synthesise `maven-metadata.xml` files into the local
+  Maven repo (`~/.m2/repository`) from the discovery catalogue
+  (`meta_artifacts`/`meta_versions`), **no network**. `mine` fetches only `.pom`, so
+  the local repo lacks the version metadata an *offline* Aether resolve needs for
+  version ranges / `LATEST` / `RELEASE`; this rebuilds it from data `index-sync`
+  already has. Writes one `maven-metadata-<repo-id>.xml` per `(gid,aid)` (default id
+  `central`, matching the `Resolver`'s remote so `SimpleLocalRepositoryManager` finds
+  it; `--also-plain` also emits plain `maven-metadata.xml`). `<versions>` in
+  publish-date order (cosmetic — Aether re-sorts); `<latest>`/`<release>` from the
+  catalogue. Functionally equivalent to Central's metadata for resolution, not a
+  byte-for-byte copy. `MetadataCmd` → `MetadataAction` →
+  `MetaRepository.streamArtifactMetadata` (single ordered join grouped client-side,
+  so heap is bounded regardless of catalogue size). `-gav <group[:artifact]>` scopes
+  it. See `MINING.md` "Offline resolution from local POMs".
 - `analyse` — inspect the cache; subcommands `pom` (analyse local POMs in
   `~/.m2/repository`) and `meta` (report discovery-metadata counts from the
   DuckDB meta tables — no longer reads on-disk `.properties`).

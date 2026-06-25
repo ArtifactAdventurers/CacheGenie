@@ -164,6 +164,12 @@ public final class DBAction {
                 "CREATE INDEX IF NOT EXISTS idx_artifacts_ga ON artifacts(gid, aid)",
                 "CREATE INDEX IF NOT EXISTS idx_dependencies_child ON dependencies(child_id)",
                 "CREATE INDEX IF NOT EXISTS idx_meta_artifacts_ga ON meta_artifacts(gid, aid)",
+                // meta_versions is keyed (ga_id, version), but a composite PK does not reliably
+                // serve a ga_id-only predicate in DuckDB — so the per-artifact arg_max(version,
+                // published) lookups (index-sync summary refresh, removeVersion, markPomAsMissing,
+                // loadVersions) degrade to full scans of a multi-million-row table. A standalone
+                // ga_id index turns those into range scans.
+                "CREATE INDEX IF NOT EXISTS idx_meta_versions_ga ON meta_versions(ga_id)",
                 // POM-mining: parent-chain joins and managed-version lookups during 'graph resolve'.
                 "CREATE INDEX IF NOT EXISTS idx_pom_meta_parent ON pom_meta(parent_gid, parent_aid, parent_version)",
                 "CREATE INDEX IF NOT EXISTS idx_direct_dep_coord ON direct_dep(dep_gid, dep_aid)",
