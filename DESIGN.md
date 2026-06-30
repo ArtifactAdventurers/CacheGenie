@@ -173,16 +173,24 @@ supported through 2027, 0 open CVEs."*
 - **Out (for now):** display/analysis UI and a served API — revisited once the data
   model is settled.
 
-## Implications for the current CLI (to reconcile)
+## Implications for the current CLI
 
-The agreed mission makes several existing commands legacy or redundant:
+The agreed mission made several existing commands legacy or redundant. Pruned so far
+(see `CLI-CLEANUP-PLAN.md` and the CHANGELOG):
 
-- The Aether transitive path (`graph artifact`, `graph cache`, `graph deps`) belongs
-  to the discarded "resolve on demand" framing; superseded by `mine` → `resolve`.
-- `migrate-meta` (`.properties`→`.json`) is dead — that storage scheme was replaced by
-  DuckDB; the command isn't even registered.
-- The browser viewer (`view` + the `viewer` module) is display-side → out of scope.
-- The `meta*` naming pileup (`meta`/`fetch`, `meta-csv`, `metadata`, `analyse meta`)
-  needs consolidation.
+- ✅ Removed the Aether transitive-resolution commands `graph artifact` and
+  `graph cache` (superseded by `mine` → `resolve`) and their dead supporting API
+  (`Resolver.resolveGraph`, `GraphRepository.persist(DependencySet)`/`isArtifactPresent`,
+  and the orphaned `DependencySet`/`DependencyBuilder`/`DotViz`).
+- ✅ Removed dead `.properties`-era code (`migrate-meta`, `UpdateAction`, `ListAction`,
+  `CreateDBAction`).
+- ✅ Removed `meta-csv` (→ `db export`) and `analyse meta` (→ `graph stats`).
+- ✅ Decided `meta`/`fetch` is kept as a targeted single-GAV POM-on-disk tool;
+  `graph mine` owns bulk acquisition.
 
-See the pruning/merge plan (tracked separately) for the staged changes.
+Still open:
+
+- `graph deps` (Aether descriptor reads) is kept for now as an online, targeted path;
+  revisit whether it stays once `mine`/`resolve` fully cover its uses.
+- The browser viewer (`view` + the `viewer` module) is display-side → out of scope;
+  not yet removed.

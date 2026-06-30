@@ -3,7 +3,6 @@ package dev.gruff.hardstop.cachegenie.entities;
 import dev.gruff.hardstop.cachegenie.parsers.POMFileParser;
 import dev.gruff.hardstop.cachegenie.utils.FileChecks;
 import dev.gruff.hardstop.cachegenie.utils.ObjectChecks;
-import dev.gruff.hardstop.resolver.DependencySet;
 
 import java.io.File;
 import java.util.HashSet;

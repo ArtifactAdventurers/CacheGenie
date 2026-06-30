@@ -118,8 +118,8 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   `-c <scratch>`). Far fewer requests than `scan`; `scan` remains for targeted
   `--gav` lookups and immediacy.
 - `meta` (`fetch`) — download missing POMs for indexed versions.
-- `graph` (`map`) — subcommands: `artifact`, `cache`, `deps`, `mine`, `resolve`,
-  `import-goblin`, `export-neo4j`, `push-neo4j`, `query` (SQL against the DuckDB graph), `stats`. `deps` (`GraphDepsCmd`) builds the
+- `graph` (`map`) — subcommands: `deps`, `mine`, `resolve`,
+  `import-goblin`, `export-neo4j`, `push-neo4j`, `query` (SQL against the DuckDB graph), `stats`. (The legacy Aether `artifact`/`cache` subcommands were removed — use `mine`+`resolve`.) `deps` (`GraphDepsCmd`) builds the
   **direct**-edge graph for a worklist selected from the meta catalogue by
   `--gav` selectors and/or `--since <dur>` (versions published within a window,
   e.g. `30d`/`12w`); `MetaRepository.selectVersionsToGraph` does the selection in
@@ -140,8 +140,7 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   (Aether sessions aren't shareable); all DB writes are funnelled through one lock
   (DuckDB single-writer). `deps` also takes `--rate <req/min>` (shared
   `RateLimiter`, one permit per artifact; `0`=unlimited) to proactively throttle
-  descriptor reads across workers. (`artifact`/`cache` still use the older Aether
-  transitive `resolveGraph`/`persist` path.)
+  descriptor reads across workers.
   `mine` (`GraphMineCmd`) is the polite alternative to `deps`: it fetches **only the
   `.pom`** per version via `PomFetcher` (local `~/.m2` first, else one plain HTTP GET
   saved into `~/.m2` — no Aether, no checksum request, no descriptor read, so no
@@ -201,7 +200,6 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   `export` (`COPY` tables + `version_ranges` to parquet/csv/json via
   `-f/--format`, `-o/--out`). Implemented in `actions/DBAction.java`. (Replaced
   the old `.properties`→CSV dumper.)
-- `meta-csv` — dump all discovery metadata to a CSV (reads `MetaRepository`).
 - `metadata` (`gen-metadata`) — synthesise `maven-metadata.xml` files into the local
   Maven repo (`~/.m2/repository`) from the discovery catalogue
   (`meta_artifacts`/`meta_versions`), **no network**. `mine` fetches only `.pom`, so
@@ -216,9 +214,9 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   `MetaRepository.streamArtifactMetadata` (single ordered join grouped client-side,
   so heap is bounded regardless of catalogue size). `-gav <group[:artifact]>` scopes
   it. See `MINING.md` "Offline resolution from local POMs".
-- `analyse` — inspect the cache; subcommands `pom` (analyse local POMs in
-  `~/.m2/repository`) and `meta` (report discovery-metadata counts from the
-  DuckDB meta tables — no longer reads on-disk `.properties`).
+- `analyse` — inspect the cache; subcommand `pom` (analyse local POMs in
+  `~/.m2/repository`). (The `meta` subcommand was removed — use `graph stats` for
+  discovery-metadata counts; `meta-csv` was removed too — use `db export`.)
 - `view` (`web`, `ui`) — launch the browser-based dependency viewer over the
   DuckDB graph. `-a/--address/--host` (default `127.0.0.1`), `-p/--port`
   (default `8080`, `0` = free port), `--no-open` to skip auto-launching a

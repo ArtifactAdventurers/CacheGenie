@@ -6,7 +6,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
-@CommandLine.Command(name = "cache", aliases = {"hydrate", "fill"}, description = "cache artifacts")
+@CommandLine.Command(name = "cache", aliases = {"hydrate", "fill"},
+        description = "Download artifact JARs into the local Maven repository (~/.m2/repository)")
 public class CacheCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(CacheCmd.class);
 

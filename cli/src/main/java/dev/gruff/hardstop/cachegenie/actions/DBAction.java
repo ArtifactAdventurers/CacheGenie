@@ -19,9 +19,8 @@ import java.sql.Statement;
  * exporting for external analysis, creating helpful indexes, and defining
  * convenience views.
  *
- * <p>Replaces the old CSV-dumping {@code CreateDBAction}: the version date-range
- * dump it produced is now the {@code version_ranges} view, exportable via
- * {@link #export}.
+ * <p>Replaces the old CSV-dumping DB action: the version date-range dump it
+ * produced is now the {@code version_ranges} view, exportable via {@link #export}.
  */
 public final class DBAction {
     private static final Logger log = LoggerFactory.getLogger(DBAction.class);
@@ -49,7 +48,7 @@ public final class DBAction {
     private boolean dbMissing() {
         if (!dbFile().exists()) {
             System.out.println("Graph database not found at " + dbFile().getAbsolutePath());
-            System.out.println("Run 'scan' or 'graph cache' first to populate it.");
+            System.out.println("Run 'index-sync' (then 'graph mine' + 'graph resolve') first to populate it.");
             return true;
         }
         return false;

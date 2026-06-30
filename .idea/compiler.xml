@@ -10,6 +10,7 @@
         <module name="resolver" />
         <module name="cli" />
         <module name="core" />
+        <module name="viewer" />
         <module name="streamer" />
         <module name="release" />
       </profile>

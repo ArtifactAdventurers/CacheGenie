@@ -11,7 +11,8 @@ import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.List;
 
-@CommandLine.Command(name = "index", aliases = {"scan"}, description = "Index remote cache")
+@CommandLine.Command(name = "index", aliases = {"scan"},
+        description = "Discover artifact versions by crawling a remote repo's HTML listings (random-walk, or targeted with --gav). For bulk discovery prefer 'index-sync'.")
 public class IndexCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(IndexCmd.class);
 

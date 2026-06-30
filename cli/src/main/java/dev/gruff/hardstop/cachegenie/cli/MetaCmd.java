@@ -7,7 +7,8 @@ import picocli.CommandLine;
 
 import java.util.List;
 
-@CommandLine.Command(name = "meta", aliases = {"fetch"}, description = "Download missing POM files for cached versions")
+@CommandLine.Command(name = "meta", aliases = {"fetch"},
+        description = "Download missing POMs onto disk for indexed versions (targeted single-GAV tool; for bulk POM acquisition use 'graph mine')")
 public class MetaCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(MetaCmd.class);
 

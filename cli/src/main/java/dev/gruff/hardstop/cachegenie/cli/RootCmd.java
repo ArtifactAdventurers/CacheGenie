@@ -10,33 +10,39 @@ import java.net.URI;
 
 
 @CommandLine.Command(name = "cachegenie", mixinStandardHelpOptions = true,
-        description = "A tool to manage and analyze Maven artifact caches.",
+        description = "Build and maintain a queryable database of Maven artifacts, their direct dependencies, and risk annotations.",
         header = {
-                "CacheGenie helps you discover, fetch, and analyze Maven artifacts.",
-                "It works by layering metadata and artifacts in your local cache."
+                "CacheGenie discovers Maven artifacts, mines their POMs for facts and direct",
+                "dependencies into a local DuckDB database, and keeps a local POM/metadata cache",
+                "as a byproduct. Dependency graphs and stats are then queries over that database."
         },
         footer = {
                 "",
-                "Normal Operation (The 'Genie' Workflow):",
-                "  1. scan (index)  : Discover versions of an artifact in remote repositories.",
-                "  2. fetch (meta)  : Download the POM 'recipes' for those versions.",
-                "  3. map (graph)   : Analyze and visualize the dependency structures.",
-                "  4. hydrate (fill): Download the actual JAR files into your local repository.",
+                "Normal Operation (build & maintain the artifact database):",
+                "  1. index-sync      : Discover artifacts/versions from the repository's published index.",
+                "  2. graph mine      : Fetch each version's POM (one GET) and store its raw facts + direct deps.",
+                "  3. graph resolve   : Project mined POMs into concrete dependency edges.",
+                "  4. metadata        : (optional) Write maven-metadata.xml into the local repo for offline resolution.",
+                "  5. cache (hydrate) : (optional) Download the actual JARs into your local repository.",
                 "",
-                "Analysis and Persistence:",
-                "  - map artifact   : Resolves dependencies and persists them to a local DuckDB.",
-                "  - map query      : Execute SQL queries against the persisted dependency graph.",
+                "Targeted / single-GAV tools:",
+                "  - scan (index)     : Crawl a remote repo for a specific --gav (immediacy; no published index needed).",
+                "  - fetch (meta)     : Download a specific POM onto disk.",
+                "",
+                "Analysis:",
+                "  - graph query      : Execute SQL (incl. recursive CTEs) against the DuckDB graph.",
+                "  - graph stats      : Graph and discovery-metadata statistics.",
                 "",
                 "Data Locations:",
-                "  - Local Repository: Artifacts (JARs/POMs) are stored in your Maven repository (default: ~/.m2/repository).",
-                "  - Metadata: Discovery info and analysis results are stored in ~/.m2/cachegenie/meta.",
+                "  - Local Repository : Artifacts (JARs/POMs) in your Maven repository (default: ~/.m2/repository).",
+                "  - Graph database   : Catalogue + dependency graph in ~/.m2/cachegenie/graph.db (DuckDB).",
                 "",
-                "Example:",
-                "  cachegenie scan --gav org.slf4j:slf4j-api",
-                "  cachegenie fetch --gav org.slf4j:slf4j-api:2.0.9",
-                "  cachegenie map artifact --gav org.slf4j:slf4j-api:2.0.9"
+                "Example (keep current):",
+                "  cachegenie index-sync",
+                "  cachegenie graph mine --since 30d --rate 60",
+                "  cachegenie graph resolve"
         },
-        subcommands = {IndexCmd.class, SyncIndexCmd.class, DBCmd.class, CompareCmd.class, CacheCmd.class, GraphCmd.class, MetaCmd.class, MetaCSVCmd.class, MetadataCmd.class, AnalyseCmd.class, ViewCmd.class})
+        subcommands = {IndexCmd.class, SyncIndexCmd.class, DBCmd.class, CompareCmd.class, CacheCmd.class, GraphCmd.class, MetaCmd.class, MetadataCmd.class, AnalyseCmd.class, ViewCmd.class})
 
 public class RootCmd  {
 

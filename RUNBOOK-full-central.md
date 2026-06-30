@@ -75,7 +75,6 @@ Sanity-check the catalogue:
 
 ```bash
 cg graph stats               # counts across the graph + discovery metadata
-cg analyse meta              # discovery-metadata counts from the meta tables
 ```
 
 ---
@@ -173,7 +172,7 @@ cg graph query "SELECT * FROM dependents WHERE gid='org.slf4j' AND aid='slf4j-ap
 cg graph stats
 cg view                      # browser UI over the graph (read-only); --no-open to skip launch
 cg db export -f parquet -o central-graph.parquet
-cg meta-csv                  # dump discovery metadata to CSV
+cg db export -f csv          # dump tables (incl. discovery metadata) to CSV
 ```
 
 See `DB_SCHEMA.md` for the schema and example analysis queries.

@@ -47,7 +47,7 @@ public class ViewCmd implements Runnable {
         File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
         if (!dbFile.exists()) {
             System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
-            System.out.println("Run 'graph artifact --gav <g:a:v>' first to populate the database.");
+            System.out.println("Run 'graph mine' + 'graph resolve' first to populate the database.");
             return;
         }
 

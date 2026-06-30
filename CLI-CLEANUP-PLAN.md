@@ -11,7 +11,11 @@ done on Steve's machine.)
 
 ---
 
-## Phase 1 — Delete dead code (safe, no behaviour change)
+## Phase 1 — Delete dead code (safe, no behaviour change) ✅ DONE (2026-06)
+
+All five classes below were deleted; the stale `CreateDBAction` doc comment in
+`DBAction` was tidied. Pre-flight confirmed no live references. Build pending on
+Steve's machine.
 
 These classes are never registered in `RootCmd.subcommands` and have no live
 references, so deleting them cannot change any reachable behaviour.
@@ -49,27 +53,24 @@ stop the Maven Central 429 storms. They are superseded by the
 
 **Recommended: deprecate first, remove next release.**
 
-1. Deprecation step (one release):
-   - In `GraphCmd`, change the two `@Command` descriptions to begin
+1. Deprecation step (one release): ✅ DONE (2026-06)
+   - ✅ In `GraphCmd`, both `@Command` descriptions now begin
      `"[DEPRECATED — use 'graph mine' + 'graph resolve'] …"`.
-   - Emit a one-line `log.warn(...)` at the top of each `run()` pointing to the
-     replacement.
-2. Removal step (next release):
-   - Delete the `GraphArtifact` and `GraphCacheCmd` static classes from
-     `GraphCmd.java`.
-   - Remove them from the `subcommands = { … }` list on `GraphCmd`
-     (`GraphCmd.GraphArtifact.class`, `GraphCmd.GraphCacheCmd.class`).
+   - ✅ Each `run()` emits a `log.warn(...)` pointing to the replacement.
+2. Removal step: ✅ DONE (2026-06)
+   - ✅ Deleted the `GraphArtifact` and `GraphCacheCmd` static classes from
+     `GraphCmd.java` and removed them from the `subcommands` list.
 
-**Second-order cleanup (after removal — verify each is then unused):** these
-become dead once the two commands are gone, but are public `core` API, so remove
-deliberately in a follow-up rather than in the same commit:
+**Second-order cleanup:** ✅ DONE in the same pass (references were verified zero
+after the command removal):
 
-- `Resolver.resolveGraph(...)` — only caller is `GraphCmd`.
-- `GraphRepository.persist(...)` (the `DependencySet` overload — **not**
-  `persistDirect`, which `graph deps` still uses).
-- `GraphRepository.isArtifactPresent(...)` — only caller is `GraphCmd`.
-- `MetaRepository.loadByPattern(...)` — callers are `GraphCmd` and a test
-  (`MetaRepositoryTest`); drop or repoint the test.
+- ✅ `Resolver.resolveGraph(...)` removed (+ the now-orphaned private `collect0`).
+- ✅ `GraphRepository.persist(DependencySet)` removed (kept `persistDirect`).
+- ✅ `GraphRepository.isArtifactPresent(...)` removed.
+- ✅ Then-orphaned classes `DependencySet`, `DependencyBuilder`, `DotViz` deleted
+  (stale unused import dropped from `POM.java`).
+- **Kept** `MetaRepository.loadByPattern(...)` — generic helper with live test
+  coverage (`MetaRepositoryTest`); not obsolete, so left in place.
 
 **Keep:** `CacheAction` (still used by the `cache`/hydrate command, `CacheCmd`)
 and `DepOps` (shared arg-group used by `CompareCmd` and `CacheCmd`).
@@ -84,21 +85,17 @@ and `DepOps` (shared arg-group used by `CompareCmd` and `CacheCmd`).
 Meta data can currently be reported/exported four ways with overlap. Goal: one
 exporter (`db export`) and one stats command (`graph stats`).
 
-1. **`meta-csv` → fold into `db export`.** `db export` already does
-   `COPY … TO` in parquet/csv/json and is the superset. Deprecate `meta-csv`
-   (`MetaCSVCmd`); after a release, delete `MetaCSVCmd` + `CreateMetaCSVAction`.
-2. **`analyse meta` → overlaps `graph stats`.** It reads `graph.db` (not the
-   cache), so it's also *misplaced* under `analyse` ("inspect the cache").
-   Recommend deprecating `AnalyseMetaCmd` and pointing users to `graph stats`;
-   keep `analyse pom` (it genuinely inspects on-disk POMs).
-3. **`meta` (fetch) vs `graph mine` — decision needed, not an automatic cut.**
-   `mine` is the scalable POM-acquisition path that also populates the graph;
-   `fetch` only hydrates `~/.m2` and sets `missing_pom`, feeding nothing into the
-   graph. Options:
-   - (a) Keep `fetch` as the targeted "just put this POM on disk" tool, but stop
-     advertising it as workflow step 2 (see Phase 4).
-   - (b) Deprecate `fetch` entirely and let `mine` own POM acquisition.
-   Recommend (a) unless there are no on-disk-only consumers of POMs.
+1. **`meta-csv` → fold into `db export`.** ✅ REMOVED (2026-06): deleted
+   `MetaCSVCmd` + `CreateMetaCSVAction`, dropped from `RootCmd` subcommands. Use
+   `db export -f csv`.
+2. **`analyse meta` → overlaps `graph stats`.** ✅ REMOVED (2026-06): deleted
+   `AnalyseMetaCmd` and the dead `AnalyseAction.analyseMeta()`, dropped from
+   `AnalyseCmd`'s subcommands. Use `graph stats`. `analyse pom` kept (genuinely
+   inspects on-disk POMs).
+3. **`meta` (fetch) vs `graph mine` — DECIDED: keep (option a).** `fetch` stays as
+   the targeted "just put this POM on disk" tool; no longer advertised as a core
+   workflow step (the `RootCmd` footer now lists it under single-GAV tools). `mine`
+   owns bulk POM acquisition. No deprecation.
 
 **Risk:** medium (user-visible commands) — hence deprecate-then-remove.
 **Effort:** ~1–2 h across two releases.
@@ -109,17 +106,15 @@ exporter (`db export`) and one stats command (`graph stats`).
 
 Cheap, no logic change, reduces confusion now.
 
-- `MetaCSVCmd` description says *"from all meta properties files"* — it reads
-  DuckDB (`MetaRepository`). Fix wording.
-- `AnalyseMetaCmd` description says *"Analyse meta properties files"* — it
-  queries `graph.db`. Fix wording.
-- `RootCmd` footer "Genie workflow" (scan→fetch→map→hydrate) predates
-  `index-sync`, `mine`, and `resolve`, so it steers new users to the slow/legacy
-  path. Update to the current recommended flow, e.g.
-  `index-sync` → `graph mine` → `graph resolve` → `cache`, with `scan`/`fetch`
-  noted as targeted single-GAV tools.
-- Sync `README.md` and `CLAUDE.md` command maps with whatever lands in Phases
-  1–3.
+- ✅ `MetaCSVCmd` description corrected (now "Dump all discovery metadata from the
+  DuckDB catalogue to a CSV").
+- ✅ `AnalyseMetaCmd` description corrected (now "Report discovery-metadata counts
+  from the DuckDB catalogue").
+- ✅ `RootCmd` footer rewritten to the current flow (`index-sync` → `graph mine` →
+  `graph resolve` → `metadata`/`cache`), with `scan`/`fetch` noted as targeted
+  single-GAV tools.
+- ⏳ Sync `README.md` and `CLAUDE.md` command maps with whatever lands in Phases
+  1–3 (CLAUDE.md/README already updated for `metadata`; revisit after Phases 2–3).
 
 **Risk:** none. **Effort:** ~30 min.
 

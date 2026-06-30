@@ -119,19 +119,16 @@ compare -g <group> -a <artifact> -v <version> [-v <version> ...]
 -   If multiple versions are provided, it performs sequential comparisons.
 
 #### `graph` (alias: `map`)
-Generates dependency graphs.
+Builds, resolves, and queries the dependency graph. Subcommands:
 
--   **`graph artifact`**: Generates a dependency graph for a specific artifact.
-    ```bash
-    graph artifact --gav <gav>
-    # OR
-    graph artifact -g <group> -a <artifact> -v <version> [-f <format>]
-    ```
-    -   `-f, --format <format>`: Output format (defaults to `dot`).
--   **`graph cache`**: Generates a combined graph representing the contents of the local cache.
-    ```bash
-    graph cache
-    ```
+-   **`graph mine`**: Fetch each catalogue version's POM (one GET, no fan-out) and store its raw facts + direct dependencies.
+-   **`graph resolve`**: Project mined POMs into concrete dependency edges.
+-   **`graph deps`**: Build the direct-dependency graph for targeted/recent versions via an Aether descriptor read.
+-   **`graph query`**: Run SQL (including recursive CTEs for transitive deps) against the DuckDB graph.
+-   **`graph stats`**: Print graph and discovery-metadata statistics.
+-   **`graph import-goblin` / `graph export-neo4j` / `graph push-neo4j`**: Seed from a Goblin CSV, or sync to a Neo4j read-side (see `GOBLIN-IMPORT.md`, `HYBRID-NEO4J.md`).
+
+To get a dependency graph for a GAV out of the database, use `graph query` with a recursive CTE (or `graph stats` for summaries).
 
 ## Database Schema
 

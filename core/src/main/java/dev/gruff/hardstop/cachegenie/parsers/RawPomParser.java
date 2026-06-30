@@ -17,9 +17,12 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static dev.gruff.hardstop.cachegenie.parsers.ParserHelper.getAll;
 import static dev.gruff.hardstop.cachegenie.parsers.ParserHelper.getOnly;
@@ -205,21 +208,192 @@ public final class RawPomParser {
         return out;
     }
 
-    /** Same lenient read as {@link POMFileParser#parseXML} but on the per-thread builder. */
+    // --- Recoverable-POM sanitisation -------------------------------------
+    //
+    // Many POMs on Central are not well-formed XML: undeclared HTML named
+    // entities (&copy; &aelig; &ndash; ...), a UTF-8 BOM or junk before the
+    // XML declaration, NUL/control characters, or trailing bytes after
+    // </project>. None of these are recoverable by Maven Resolver either — it
+    // runs the same bytes through an equally strict reader (Xpp3/StAX) and
+    // gives us no hook to pre-clean the bytes. We fix what we safely can here,
+    // in two passes: a light clean that never alters document structure (so
+    // POMs that already parse keep parsing), and — only if that still fails —
+    // an aggressive clean that trims the prolog/trailer.
+
+    private static final Pattern ENTITY_REF = Pattern.compile("&([a-zA-Z][a-zA-Z0-9]*);");
+    private static final Pattern XML_DECL   = Pattern.compile("<\\?xml\\b[^>]*\\?>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ROOT_START = Pattern.compile("<project(?=[\\s/>])", Pattern.CASE_INSENSITIVE);
+    private static final Pattern BAD_CHARS  = Pattern.compile("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\uFEFF]");
+    private static final String  CLOSE_TAG  = "</project>";
+
+    private static final Map<String, String> HTML_ENTITIES = buildHtmlEntities();
+
+    /** Lenient read on the per-thread builder, with byte-level recovery of common malformations. */
     private static Document parseXML(File file) {
+        final String light;
         try {
             byte[] bytes = Files.readAllBytes(file.toPath());
-            String content = new String(bytes, StandardCharsets.UTF_8).trim();
-            if (content.contains("&") && (content.contains("&oslash;") || content.contains("&nbsp;") || content.contains("&aacute;"))) {
-                content = content.replace("&oslash;", "&#248;")
-                                 .replace("&nbsp;", "&#160;")
-                                 .replace("&aacute;", "&#225;");
-            }
-            return BUILDER.get().parse(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
+            light = lightSanitize(new String(bytes, StandardCharsets.UTF_8));
         } catch (Exception e) {
-            log.warn("Skipping malformed POM {}: {}", file.getAbsolutePath(), e.getMessage());
+            log.warn("Skipping unreadable POM {}: {}", file.getAbsolutePath(), e.getMessage());
             return null;
         }
+
+        try {
+            return parseString(light);
+        } catch (Exception first) {
+            // Second chance: trim prolog/trailing junk and retry. Only attempted
+            // when the light parse failed, so well-formed POMs are never altered.
+            String aggressive = aggressiveSanitize(light);
+            if (!aggressive.equals(light)) {
+                try {
+                    return parseString(aggressive);
+                } catch (Exception ignored) {
+                    // fall through and report the original (more informative) failure
+                }
+            }
+            log.warn("Skipping malformed POM {}: {}", file.getAbsolutePath(), first.getMessage());
+            return null;
+        }
+    }
+
+    private static Document parseString(String content) throws Exception {
+        return BUILDER.get().parse(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /**
+     * Structure-preserving clean: strip a BOM/leading-trailing whitespace and
+     * invalid XML control characters, then replace undeclared HTML named
+     * entities with numeric character references. Does not touch the prolog or
+     * element tree, so any POM that already parsed still parses unchanged.
+     * Entity replacement is skipped when the document declares its own entities
+     * ({@code <!ENTITY ...}), so a deliberately-redefined name is never clobbered.
+     */
+    private static String lightSanitize(String s) {
+        s = BAD_CHARS.matcher(s).replaceAll("");
+        s = s.strip();
+        if (!s.contains("<!ENTITY")) {
+            s = replaceHtmlEntities(s);
+        }
+        return s;
+    }
+
+    /**
+     * Last-resort clean for documents that still fail: reduce the text to the
+     * first {@code <project> .. </project>} element, optionally re-prefixed with
+     * a leading XML declaration. This removes junk before the root ("content not
+     * allowed in prolog", a misplaced {@code <?xml?>}, stray preceding markup)
+     * and after it ("content not allowed in trailing section", concatenated
+     * documents). Returns the input unchanged if no {@code <project>} root is found.
+     */
+    private static String aggressiveSanitize(String s) {
+        Matcher rm = ROOT_START.matcher(s);
+        if (!rm.find()) return s;               // can't locate a root; leave as-is
+        int rootStart = rm.start();
+
+        int closeIdx = indexOfIgnoreCase(s, CLOSE_TAG, rootStart);
+        String body = closeIdx >= 0
+                ? s.substring(rootStart, closeIdx + CLOSE_TAG.length())
+                : s.substring(rootStart);
+
+        Matcher dm = XML_DECL.matcher(s);
+        String decl = (dm.find() && dm.start() == 0) ? s.substring(0, dm.end()) + "\n" : "";
+        return decl + body;
+    }
+
+    /** Replace any {@code &name;} whose name is a known HTML entity with a numeric char ref. */
+    private static String replaceHtmlEntities(String s) {
+        if (s.indexOf('&') < 0) return s;
+        Matcher m = ENTITY_REF.matcher(s);
+        StringBuilder out = new StringBuilder(s.length());
+        while (m.find()) {
+            String repl = HTML_ENTITIES.get(m.group(1));
+            // "$0" re-inserts the original match verbatim (the five XML-predefined
+            // entities and any unknown names are intentionally left untouched).
+            m.appendReplacement(out, repl != null ? repl : "$0");
+        }
+        m.appendTail(out);
+        return out.toString();
+    }
+
+    private static int indexOfIgnoreCase(String haystack, String needle, int from) {
+        final int end = haystack.length() - needle.length();
+        for (int i = Math.max(0, from); i <= end; i++) {
+            if (haystack.regionMatches(true, i, needle, 0, needle.length())) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * The HTML4 named-entity set mapped to numeric character references. The five
+     * XML-predefined entities (amp, lt, gt, quot, apos) are deliberately omitted
+     * so they are never rewritten.
+     */
+    private static Map<String, String> buildHtmlEntities() {
+        Map<String, String> m = new HashMap<>(300);
+        // Latin-1 supplement (U+00A0–U+00FF)
+        int[] latin = {
+            160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,
+            176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,
+            192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,
+            208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,
+            224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,
+            240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255 };
+        String[] latinNames = {
+            "nbsp","iexcl","cent","pound","curren","yen","brvbar","sect","uml","copy","ordf","laquo","not","shy","reg","macr",
+            "deg","plusmn","sup2","sup3","acute","micro","para","middot","cedil","sup1","ordm","raquo","frac14","frac12","frac34","iquest",
+            "Agrave","Aacute","Acirc","Atilde","Auml","Aring","AElig","Ccedil","Egrave","Eacute","Ecirc","Euml","Igrave","Iacute","Icirc","Iuml",
+            "ETH","Ntilde","Ograve","Oacute","Ocirc","Otilde","Ouml","times","Oslash","Ugrave","Uacute","Ucirc","Uuml","Yacute","THORN","szlig",
+            "agrave","aacute","acirc","atilde","auml","aring","aelig","ccedil","egrave","eacute","ecirc","euml","igrave","iacute","icirc","iuml",
+            "eth","ntilde","ograve","oacute","ocirc","otilde","ouml","divide","oslash","ugrave","uacute","ucirc","uuml","yacute","thorn","yuml" };
+        for (int i = 0; i < latin.length; i++) m.put(latinNames[i], "&#" + latin[i] + ";");
+
+        // Latin Extended-A, spacing modifiers
+        put(m, "OElig", 338); put(m, "oelig", 339); put(m, "Scaron", 352); put(m, "scaron", 353);
+        put(m, "Yuml", 376); put(m, "fnof", 402); put(m, "circ", 710); put(m, "tilde", 732);
+
+        // General punctuation
+        put(m, "ensp", 8194); put(m, "emsp", 8195); put(m, "thinsp", 8201);
+        put(m, "zwnj", 8204); put(m, "zwj", 8205); put(m, "lrm", 8206); put(m, "rlm", 8207);
+        put(m, "ndash", 8211); put(m, "mdash", 8212);
+        put(m, "lsquo", 8216); put(m, "rsquo", 8217); put(m, "sbquo", 8218);
+        put(m, "ldquo", 8220); put(m, "rdquo", 8221); put(m, "bdquo", 8222);
+        put(m, "dagger", 8224); put(m, "Dagger", 8225); put(m, "bull", 8226);
+        put(m, "hellip", 8230); put(m, "permil", 8240); put(m, "prime", 8242); put(m, "Prime", 8243);
+        put(m, "lsaquo", 8249); put(m, "rsaquo", 8250); put(m, "oline", 8254); put(m, "frasl", 8260);
+        put(m, "euro", 8364); put(m, "trade", 8482);
+
+        // Greek
+        int[] greekCp = {
+            913,914,915,916,917,918,919,920,921,922,923,924,925,926,927,928,929,931,932,933,934,935,936,937,
+            945,946,947,948,949,950,951,952,953,954,955,956,957,958,959,960,961,962,963,964,965,966,967,968,969,
+            977,978,982 };
+        String[] greekNm = {
+            "Alpha","Beta","Gamma","Delta","Epsilon","Zeta","Eta","Theta","Iota","Kappa","Lambda","Mu","Nu","Xi","Omicron","Pi","Rho","Sigma","Tau","Upsilon","Phi","Chi","Psi","Omega",
+            "alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa","lambda","mu","nu","xi","omicron","pi","rho","sigmaf","sigma","tau","upsilon","phi","chi","psi","omega",
+            "thetasym","upsih","piv" };
+        for (int i = 0; i < greekCp.length; i++) m.put(greekNm[i], "&#" + greekCp[i] + ";");
+
+        // Letterlike / arrows / math (HTML4 symbol set)
+        put(m, "weierp", 8472); put(m, "image", 8465); put(m, "real", 8476); put(m, "alefsym", 8501);
+        put(m, "larr", 8592); put(m, "uarr", 8593); put(m, "rarr", 8594); put(m, "darr", 8595); put(m, "harr", 8596); put(m, "crarr", 8629);
+        put(m, "lArr", 8656); put(m, "uArr", 8657); put(m, "rArr", 8658); put(m, "dArr", 8659); put(m, "hArr", 8660);
+        put(m, "forall", 8704); put(m, "part", 8706); put(m, "exist", 8707); put(m, "empty", 8709); put(m, "nabla", 8711);
+        put(m, "isin", 8712); put(m, "notin", 8713); put(m, "ni", 8715); put(m, "prod", 8719); put(m, "sum", 8721);
+        put(m, "minus", 8722); put(m, "lowast", 8727); put(m, "radic", 8730); put(m, "prop", 8733); put(m, "infin", 8734);
+        put(m, "ang", 8736); put(m, "and", 8743); put(m, "or", 8744); put(m, "cap", 8745); put(m, "cup", 8746);
+        put(m, "int", 8747); put(m, "there4", 8756); put(m, "sim", 8764); put(m, "cong", 8773); put(m, "asymp", 8776);
+        put(m, "ne", 8800); put(m, "equiv", 8801); put(m, "le", 8804); put(m, "ge", 8805);
+        put(m, "sub", 8834); put(m, "sup", 8835); put(m, "nsub", 8836); put(m, "sube", 8838); put(m, "supe", 8839);
+        put(m, "oplus", 8853); put(m, "otimes", 8855); put(m, "perp", 8869); put(m, "sdot", 8901);
+        put(m, "lceil", 8968); put(m, "rceil", 8969); put(m, "lfloor", 8970); put(m, "rfloor", 8971);
+        put(m, "lang", 9001); put(m, "rang", 9002); put(m, "loz", 9674);
+        put(m, "spades", 9824); put(m, "clubs", 9827); put(m, "hearts", 9829); put(m, "diams", 9830);
+        return m;
+    }
+
+    private static void put(Map<String, String> m, String name, int cp) {
+        m.put(name, "&#" + cp + ";");
     }
 
     private static DocumentBuilder newBuilder() {

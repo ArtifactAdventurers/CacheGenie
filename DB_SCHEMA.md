@@ -24,10 +24,10 @@ split along that line:
   - **`meta`/`fetch`** downloads POM files and sets `missing_pom` when a POM is
     absent upstream.
 - **Dependency graph** (`artifacts`, `dependencies`) — *how things relate*.
-  Populated by `graph artifact` / `graph cache`, which resolve POMs with Maven
-  Resolver (Aether) and persist the resulting nodes and edges via
-  `GraphRepository`. This data comes from the POM `<dependencies>` — it is **not**
-  in the index, which is why `index-sync` alone can't build the graph.
+  Populated by `graph resolve` (projecting mined POMs into concrete edges),
+  `graph deps` (Aether descriptor reads), or `graph import-goblin` (bulk CSV load),
+  via `GraphRepository`. This data comes from the POM `<dependencies>` — it is
+  **not** in the index, which is why `index-sync` alone can't build the graph.
 - **POM mining** (`pom_meta`, `direct_dep`, `dependency_management`,
   `pom_properties`, `pom_developers`, `pom_licenses`) — *what each POM declares,
   raw*. Populated by the raw-mining path: one descriptor-free fetch+parse per
@@ -45,7 +45,7 @@ because only the HTML `scan` parses `maven-metadata.xml`).
 ## Tables
 
 ### 1. `artifacts`
-Maps Maven coordinates (GAV) to unique integer IDs. **Populated by** `graph artifact` / `graph cache` (every node in a resolved dependency graph), via `GraphRepository`.
+Maps Maven coordinates (GAV) to unique integer IDs. **Populated by** `graph resolve` / `graph deps` / `graph import-goblin` (every node in the dependency graph), via `GraphRepository`.
 
 | Column | Type | Description |
 | :--- | :--- | :--- |
@@ -59,7 +59,7 @@ Maps Maven coordinates (GAV) to unique integer IDs. **Populated by** `graph arti
 - `UNIQUE (gid, aid, version, classifier)`: Ensures no duplicate GAV entries.
 
 ### 2. `dependencies`
-Directed dependency edges. **Populated by** `graph artifact` / `graph cache` from the resolved POM `<dependencies>` (Maven Resolver / Aether).
+Directed dependency edges. **Populated by** `graph resolve` (from mined POMs), `graph deps` (Aether descriptor reads), or `graph import-goblin` (Goblin CSV).
 
 | Column | Type | Description |
 | :--- | :--- | :--- |

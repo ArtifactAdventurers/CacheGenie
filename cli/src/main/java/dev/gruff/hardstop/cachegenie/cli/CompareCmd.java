@@ -14,7 +14,7 @@ import picocli.CommandLine;
 import java.util.List;
 
 
-@CommandLine.Command(name = "compare", description = "Analyse APi differences")
+@CommandLine.Command(name = "compare", description = "Compare the public API between two versions of an artifact")
 public class CompareCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(CompareCmd.class);
 

@@ -1,258 +1,24 @@
 package dev.gruff.hardstop.cachegenie.cli;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
-import dev.gruff.hardstop.cachegenie.MavenMetaData;
-import dev.gruff.hardstop.cachegenie.MetaVersionSet;
-import dev.gruff.hardstop.cachegenie.entities.POMStatus;
-import dev.gruff.hardstop.cachegenie.actions.CacheAction;
-import dev.gruff.hardstop.cachegenie.actions.index.IndexAction;
-import dev.gruff.hardstop.cachegenie.graph.DotViz;
 import dev.gruff.hardstop.cachegenie.graph.GraphRepository;
 import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
-import dev.gruff.hardstop.cachegenie.utils.Progress;
-import dev.gruff.hardstop.resolver.DependencySet;
-import dev.gruff.hardstop.resolver.Resolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 import java.io.File;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.sql.*;
 
 
-@CommandLine.Command(name = "graph", aliases = {"map"}, description = "Produce graph of artifact dependencies ", subcommands = {GraphCmd.GraphCacheCmd.class, GraphCmd.GraphArtifact.class, GraphDepsCmd.class, GraphMineCmd.class, GraphResolveCmd.class, GraphImportCmd.class, GraphExportNeo4jCmd.class, GraphPushNeo4jCmd.class, GraphCmd.GraphQueryCmd.class, GraphCmd.GraphStatsCmd.class})
+@CommandLine.Command(name = "graph", aliases = {"map"}, description = "Build, resolve, and query the dependency graph (mine POMs, resolve edges, run SQL)", subcommands = {GraphDepsCmd.class, GraphMineCmd.class, GraphResolveCmd.class, GraphImportCmd.class, GraphExportNeo4jCmd.class, GraphPushNeo4jCmd.class, GraphCmd.GraphQueryCmd.class, GraphCmd.GraphStatsCmd.class})
 public class GraphCmd  {
     private static final Logger log = LoggerFactory.getLogger(GraphCmd.class);
 
     @CommandLine.ParentCommand
     RootCmd parent;
 
-    @CommandLine.Command(name = "cache", description = "Produce combined graph of local cache entries ")
-    public  static class  GraphCacheCmd implements Runnable {
-
-        @CommandLine.ParentCommand
-        GraphCmd parent;
-
-        @Override
-        public void run() {
-            log.info("Graph cache: building combined dependency graph from local cache");
-
-            CacheGenie cg = parent.parent.genie();
-            CacheAction ca = new CacheAction(cg);
-            GraphRepository gr = new GraphRepository(cg.cacheGenieRoot());
-            Resolver r = Resolver.Builder(cg).build();
-            Progress progress = Progress.start("Graph cache");
-
-            // [0]=POMs read, [1]=parse-skipped, [2]=already in db,
-            // [3]=resolve-failed, [4]=persisted, [5]=nodes, [6]=links
-            long[] c = new long[7];
-
-            ca.stream().forEach(pom -> {
-                c[0]++;
-                if (pom.status() != POMStatus.OK) {
-                    c[1]++;
-                    progress.tick(pom.artifact().value() + " [" + pom.status() + "]");
-                    return;
-                }
-
-                var ref = pom.artifact();
-                String gid = ref.groupID().value();
-                String aid = ref.artifactID().value();
-                String ver = ref.version().value();
-                String gav = gid + ":" + aid + ":" + ver;
-                progress.tick(gav);
-
-                if (gr.isArtifactPresent(gid, aid, ver)) {
-                    c[2]++;
-                    return;
-                }
-
-                try {
-                    DependencySet set = r.resolveGraph(gid, aid, ver);
-                    if (set == null || set.getNodes().isEmpty()) {
-                        c[3]++;
-                        log.warn("Could not resolve dependency graph for {}", gav);
-                        return;
-                    }
-                    gr.persist(set);
-                    c[4]++;
-                    c[5] += set.getNodes().size();
-                    for (Set<DependencySet.Node> kids : set.getLinks().values()) {
-                        if (kids != null) c[6] += kids.size();
-                    }
-                } catch (Exception e) {
-                    c[3]++;
-                    log.warn("Failed to resolve {}: {}", gav, e.getMessage());
-                }
-            });
-
-            progress.done();
-
-            System.out.printf(
-                    "Graph cache complete: %d POMs scanned (%d malformed, %d already persisted), "
-                  + "%d newly persisted, %d failed to resolve%n",
-                    c[0], c[1], c[2], c[4], c[3]);
-            System.out.printf("Added %d nodes and %d links%n", c[5], c[6]);
-            System.out.println("Graph persisted to " + new File(cg.cacheGenieRoot(), "graph.db").getAbsolutePath());
-        }
-
-    }
-
-    @CommandLine.Command(name = "artifact", description = "Produce graph of artifact ")
-
-    public  static class GraphArtifact implements Runnable {
-
-        @CommandLine.ParentCommand
-        GraphCmd parent;
-
-        @CommandLine.ArgGroup(exclusive = false, multiplicity = "1")
-        DepOps depops;
-
-        @CommandLine.Option(names = {"-f", "--format"}, required = false, paramLabel = "output format", description = "Output format")
-        String format = "dot";
-
-
-        @Override
-        public void run() {
-            log.info("Graph");
-
-            CacheGenie cg = parent.parent.genie();
-            IndexAction ia = new IndexAction(cg);
-
-            String gid;
-            String aid = null;
-            String version = null;
-
-            if (depops.gav != null) {
-                String[] parts = depops.gav.split(":");
-                gid = parts[0];
-                if (parts.length > 1) aid = parts[1];
-                if (parts.length > 2) version = parts[2];
-            } else if (depops.gid != null) {
-                gid = depops.gid;
-                aid = depops.aid;
-                if (depops.versionTargets != null && !depops.versionTargets.isEmpty()) {
-                    version = depops.versionTargets.getFirst();
-                }
-            } else {
-                throw new CommandLine.ParameterException(new CommandLine(this), "Missing required options: use either --gav or --group-id, --artifact-id and --version");
-            }
-
-            if (aid == null || aid.equals("*") || version == null || version.equals("*")) {
-                processPattern(cg, ia, gid, aid, version);
-                return;
-            }
-
-            MetaVersionSet versions = ia.versions(gid, aid);
-
-            // do we have the version requested?
-            if (!versions.hasVersion(version)) {
-                System.err.println("Error: Can't locate version " + version + " for artifact " + gid + ":" + aid);
-                System.err.println("Try running 'scan --gav " + gid + ":" + aid + "' first to discover available versions.");
-                System.exit(1);
-            }
-
-            log.info("root {}", parent.parent.repo);
-            log.info("cache {}", parent.parent.cache);
-            log.info("gid {}", gid);
-            log.info("aid {}", aid);
-            log.info("version {}", version);
-            
-            GraphRepository gr = new GraphRepository(cg.cacheGenieRoot());
-            if (gr.isArtifactPresent(gid, aid, version)) {
-                System.out.println(gid + ":" + aid + ":" + version + " already in the db");
-                System.exit(0);
-            }
-
-            Resolver r = Resolver.Builder(cg).build();
-
-            DependencySet set = r.resolveGraph(gid, aid, version);
-
-            if (set == null || set.getNodes().isEmpty()) {
-                System.err.println("Error: Failed to resolve dependency graph for " + gid + ":" + aid + ":" + version);
-                System.exit(1);
-            }
-
-            gr.persist(set);
-
-            int nodes = set.getNodes().size();
-            int linksCount = 0;
-            for (Map.Entry<DependencySet.Node, Set<DependencySet.Node>> entry : set.getLinks().entrySet()) {
-                DependencySet.Node parent = entry.getKey();
-                for (DependencySet.Node kid : entry.getValue()) {
-                    if (!(parent.gid.equals(kid.gid) && parent.aid.equals(kid.aid) && parent.ver.equals(kid.ver))) {
-                        linksCount++;
-                    }
-                }
-            }
-            System.out.printf("Resolved %d nodes and %d links\n", nodes, linksCount);
-            System.out.println("Graph persisted to " + new File(cg.cacheGenieRoot(), "graph.db").getAbsolutePath());
-
-            if ("dot".equalsIgnoreCase(format)) {
-                DotViz.viz(System.out, set);
-            }
-
-            System.exit(0);
-        }
-
-        private void processPattern(CacheGenie cg, IndexAction ia, String gid, String aid, String version) {
-            log.info("Processing pattern {}:{}:{}", gid, aid, version);
-            MetaRepository metaRepo = new MetaRepository(cg.cacheGenieRoot());
-            String aidFilter = (aid == null || aid.equals("*")) ? null : aid;
-            List<MavenMetaData> matched = metaRepo.loadByPattern(gid, aidFilter);
-
-            if (matched.isEmpty()) {
-                System.err.println("No metadata found matching pattern " + gid + ":" + (aid == null ? "*" : aid));
-                return;
-            }
-
-            Resolver r = Resolver.Builder(cg).build();
-            GraphRepository gr = new GraphRepository(cg.cacheGenieRoot());
-            int totalNodes = 0;
-            int totalLinks = 0;
-
-            for (MavenMetaData m : matched) {
-                Set<String> versionsToProcess = new java.util.HashSet<>();
-                if (version == null || version.equals("*")) {
-                    versionsToProcess.addAll(m.versions().stream().map(MavenMetaData.Version::value).collect(java.util.stream.Collectors.toList()));
-                } else {
-                    if (m.versions().hasVersion(version)) {
-                        versionsToProcess.add(version);
-                    }
-                }
-
-                for (String v : versionsToProcess) {
-                    if (gr.isArtifactPresent(m.gid, m.aid, v)) {
-                        System.out.println(m.gid + ":" + m.aid + ":" + v + " already in the db");
-                        continue;
-                    }
-                    log.info("Resolving {}:{}:{}", m.gid, m.aid, v);
-                    DependencySet set = r.resolveGraph(m.gid, m.aid, v);
-                    if (set != null && !set.getNodes().isEmpty()) {
-                        gr.persist(set);
-                        totalNodes += set.getNodes().size();
-                        // simplistic link count for report
-                        for (Set<DependencySet.Node> kids : set.getLinks().values()) {
-                            totalLinks += kids.size();
-                        }
-                        if ("dot".equalsIgnoreCase(format)) {
-                            System.out.println("// Graph for " + m.gid + ":" + m.aid + ":" + v);
-                            DotViz.viz(System.out, set);
-                        }
-                    }
-                }
-            }
-
-            System.out.printf("Total Resolved Nodes: %d, Total Links Persisted: %d\n", totalNodes, totalLinks);
-            System.out.println("Graphs persisted to " + new File(cg.cacheGenieRoot(), "graph.db").getAbsolutePath());
-            System.exit(0);
-        }
-    }
-
-    @CommandLine.Command(name = "query", description = "Query the graph database")
+    @CommandLine.Command(name = "query", description = "Run SQL (incl. recursive CTEs for transitive deps) against the DuckDB graph")
     public static class GraphQueryCmd implements Runnable {
 
         @CommandLine.ParentCommand
@@ -271,7 +37,7 @@ public class GraphCmd  {
             File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
             if (!dbFile.exists()) {
                 System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
-                System.out.println("Run 'graph artifact' first to populate the database.");
+                System.out.println("Run 'graph mine' + 'graph resolve' first to populate the database.");
                 return;
             }
 
@@ -356,7 +122,7 @@ public class GraphCmd  {
             File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
             if (!dbFile.exists()) {
                 System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
-                System.out.println("Run 'graph artifact' first to populate the database.");
+                System.out.println("Run 'graph mine' + 'graph resolve' first to populate the database.");
                 return;
             }
 
@@ -365,7 +131,7 @@ public class GraphCmd  {
             // 'graph deps'. The trade-off is that we cannot run schema
             // migrations here, so we tolerate absent tables/columns instead: a
             // DB created by only 'scan' has just the meta tables; one created by
-            // only 'graph artifact/cache' has just the graph tables.
+            // only 'graph deps'/'mine' has just the graph tables.
             //
             // NOTE: DuckDB still refuses to open a file (even read-only) while
             // another process holds it read-write, so this does not let 'stats'
@@ -439,7 +205,7 @@ public class GraphCmd  {
                     }
                 }
             } catch (SQLException e) {
-                System.out.println("\n(graph tables not present -- run 'graph deps' to populate)");
+                System.out.println("\n(graph tables not present -- run 'graph deps' or 'graph mine'+'graph resolve' to populate)");
             }
         }
 
