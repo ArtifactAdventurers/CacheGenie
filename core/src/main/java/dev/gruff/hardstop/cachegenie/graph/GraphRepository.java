@@ -27,6 +27,34 @@ public class GraphRepository {
         return DriverManager.getConnection("jdbc:duckdb:" + dbPath);
     }
 
+    /**
+     * Point DuckDB at an explicit spill directory (next to the database), stream large
+     * {@code INSERT ... SELECT} results instead of buffering them to preserve row order,
+     * and optionally cap DuckDB's memory/threads — so set-based work spills to disk
+     * rather than exhausting RAM alongside the JVM. Mirrors
+     * {@code MetaRepository.applyMemoryGuards} / {@code PomResolver.applyMemoryGuards};
+     * settings are DB-wide while the database is open in this process. Best-effort:
+     * failures are logged and work proceeds on defaults.
+     */
+    private void applyMemoryGuards(Connection conn, String memLimit, int dbThreads) {
+        String tempDir = (dbPath + ".tmp").replace("'", "''");
+        try (Statement st = conn.createStatement()) {
+            st.execute("SET temp_directory = '" + tempDir + "'");
+            try { st.execute("SET preserve_insertion_order = false"); } catch (SQLException ignore) { /* older DuckDB */ }
+            if (dbThreads > 0) {
+                st.execute("SET threads = " + dbThreads);
+            }
+            if (memLimit != null && !memLimit.isBlank()) {
+                st.execute("SET memory_limit = '" + memLimit.trim().replace("'", "''") + "'");
+            }
+            log.info("Mining DB guards: memory_limit={}, threads={}, preserve_insertion_order=false, temp_directory={}.tmp",
+                    (memLimit != null && !memLimit.isBlank()) ? memLimit.trim() : "<default ~80% RAM>",
+                    dbThreads > 0 ? dbThreads : "<default: one per core>", dbPath);
+        } catch (SQLException e) {
+            log.warn("Could not apply DuckDB memory guards (continuing on defaults): {}", e.getMessage());
+        }
+    }
+
     private void initSchema() {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement()) {
@@ -369,7 +397,17 @@ public class GraphRepository {
      * --rewrite} afterwards as with {@code index-sync}.
      */
     public MiningWriter openMiningWriter() throws SQLException {
-        return new MiningWriter();
+        return openMiningWriter(null, 0);
+    }
+
+    /**
+     * As {@link #openMiningWriter()}, with explicit DuckDB caps: {@code memLimit}
+     * (e.g. "2GB"; null/blank = DuckDB default ~80% RAM) and {@code dbThreads}
+     * (0 = default). On small-RAM machines the flush merges join against the large
+     * pom tables, so cap DuckDB below RAM minus the JVM's footprint.
+     */
+    public MiningWriter openMiningWriter(String memLimit, int dbThreads) throws SQLException {
+        return new MiningWriter(memLimit, dbThreads);
     }
 
     /** Bulk, Appender-backed writer for {@code graph mine}; see {@link #openMiningWriter()}. */
@@ -384,8 +422,13 @@ public class GraphRepository {
         private boolean appendersOpen = false;
         private int staged = 0;
 
-        private MiningWriter() throws SQLException {
+        private MiningWriter(String memLimit, int dbThreads) throws SQLException {
             conn = getConnection();
+            // The every-FLUSH_EVERY merge joins staging against the (large) pom tables;
+            // without a spill directory and a memory cap DuckDB defaults to ~80% of
+            // physical RAM *on top of* the JVM — the memory-pressure regime in which
+            // the mine writer segfaulted natively on an 8GB box.
+            applyMemoryGuards(conn, memLimit, dbThreads);
             conn.setAutoCommit(false);
             duck = conn.unwrap(org.duckdb.DuckDBConnection.class);
             createStaging();

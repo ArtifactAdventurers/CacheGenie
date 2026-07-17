@@ -179,7 +179,11 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   is opened *after* the page read closes its connection, so a reader and the writer are never
   open against `graph.db` at once. `--limit` is a total budget across pages/selectors (still
   useful for polite, resumable drips, not just to bound memory).
-  Same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`. Parents
+  Same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`; plus
+  `--mem-limit <size>`/`--db-threads <n>` DuckDB caps for the mining writer (its
+  flush merges join the large `pom_*` tables — cap it on small-RAM machines, the
+  unguarded default of ~80% RAM on top of the JVM segfaulted DuckDB natively on
+  an 8GB box). Parents
   and BOMs are mined once as their own nodes, never re-downloaded per child.
   `PomFetcher`'s shared `HttpClient` uses **HTTP/1.1 deliberately** (not HTTP/2): the
   JDK client multiplexes all HTTP/2 requests onto one connection per origin and throws

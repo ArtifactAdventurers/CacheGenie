@@ -77,6 +77,15 @@ public class GraphMineCmd implements Runnable {
             description = "Mine the ENTIRE un-mined catalogue (no --gav/--since filter). Required to run unfiltered — a guard against accidentally launching a full-Central crawl.")
     boolean all;
 
+    @CommandLine.Option(names = {"--mem-limit"}, paramLabel = "<size>",
+            description = "Cap DuckDB's memory for the mining writer, e.g. 2GB (default: DuckDB's ~80% of RAM). "
+                    + "Set it well below RAM minus the JVM's footprint on small machines — the flush merges join against the large pom tables.")
+    String memLimit;
+
+    @CommandLine.Option(names = {"--db-threads"}, paramLabel = "<n>",
+            description = "Cap DuckDB's worker threads for the mining writer (default: one per core).")
+    int dbThreads = 0;
+
     @CommandLine.Option(names = {"--limit"}, paramLabel = "<n>",
             description = "Stop after selecting N versions (0 = no limit). For polite, resumable chunks — re-running picks up where you left off since mined versions are excluded.")
     int limit = 0;
@@ -222,7 +231,7 @@ public class GraphMineCmd implements Runnable {
                 final WriteItem poison = new WriteItem(null, null);
                 AtomicBoolean writerDead = new AtomicBoolean(false);
                 Thread drainer = new Thread(() -> {
-                    try (GraphRepository.MiningWriter writer = gr.openMiningWriter()) {
+                    try (GraphRepository.MiningWriter writer = gr.openMiningWriter(memLimit, dbThreads)) {
                         for (;;) {
                             WriteItem it = writeQ.take();
                             if (it == poison) break;
