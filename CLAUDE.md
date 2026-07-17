@@ -51,8 +51,10 @@ The reactor root (`pom.xml`, groupId `dev.gruff.hardstop`, artifactId
     `MavenMetaData`, `WalkList`.
   - `cachegenie.entities` — Maven coordinate model: `ArtifactRef`, `GroupId`,
     `ArtifactId`, `Version`, `POM`, `POMStatus`.
-  - `cachegenie.graph` — `GraphBuilder`, `GraphNode`, `DotViz` (DOT output),
-    `GraphRepository` (DuckDB persistence).
+  - `cachegenie.graph` — `GraphBuilder`, `GraphNode`, `GraphRepository`
+    (DuckDB persistence), `MetaRepository` (discovery catalogue), `PomResolver`
+    (deferred resolution), and `EcosystemStats` (read-only evolution analytics
+    backing the `insights` command).
   - `cachegenie.parsers` — `POMFileParser`, `ParserHelper`.
   - `cachegenie.utils` — `FileChecks`, `ObjectChecks`, `StringChecks`.
   - `resolver` — wrappers around Maven Resolver (Aether): `Resolver`,
@@ -109,11 +111,30 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   every ADD record into a staging table via DuckDB's Appender then merges set-based
   (`MetaRepository.IndexStageLoader` — collapses ~100M file-records to distinct
   versions once, builds the index once; the earlier per-row path took ~24h);
-  **incremental** pulls apply the small diff row-by-row via
-  `MetaRepository.IndexSyncWriter` (honouring ARTIFACT_REMOVE).
+  **incremental** pulls are processed **one chunk at a time in constant memory**:
+  each chunk's ADDs stream into the staging table and merge set-based (the merge's
+  largest-main-file-wins dedup replaces any in-memory buffering), its few
+  ARTIFACT_REMOVEs apply via `MetaRepository.IndexSyncWriter`, and the local sync
+  state is advanced past the chunk (atomic write of the index `.properties` with
+  `nexus.index.last-incremental` bumped) before the next starts — so a killed or
+  failed catch-up **resumes at the first unprocessed chunk**. `IndexerSyncAction`
+  owns that state file; `IndexReader.close()` (which stores the full remote state,
+  i.e. "all synced") is only called on complete success — never on failure, where
+  it would silently skip the unprocessed chunks on the next run.
   `HttpResourceHandler`/`FileWritableResourceHandler` (in `actions/index`) are the
-  remote/local `ResourceHandler`s. The full load grows `graph.db` with the staging
-  table (run `db compact --rewrite` after). `--limit <n>` stops after N records and
+  remote/local `ResourceHandler`s; `HttpResourceHandler` streams are self-healing —
+  a mid-stream reset reconnects with `Range: bytes=<offset>-` (`If-Range`-pinned to
+  the original ETag, bounded consecutive retries + backoff) so the hour-long full
+  pull survives CDN connection resets instead of restarting from byte 0. The staging merge applies DuckDB memory guards
+  (spill `temp_directory` next to graph.db, `preserve_insertion_order=false`;
+  `MetaRepository.applyMemoryGuards`) — without them the full merge OOM-killed at
+  ~20M staged records. `--mem-limit <size>` (recommended for a full bootstrap; set
+  below RAM minus JVM heap) and `--db-threads <n>` cap DuckDB further. Full pulls
+  merge every `--merge-batch <n>` staged records (default 5M; `0` = one merge at
+  the end) so peak merge memory is bounded by batch size, not pull size — safe
+  because the staging merge upserts largest-file-wins (`ON CONFLICT DO UPDATE ...
+  WHERE` strictly-larger file) and is idempotent across batches. The full
+  load grows `graph.db` with the staging table (run `db compact --rewrite` after). `--limit <n>` stops after N records and
   does NOT persist sync state (smoke-test the full path quickly; pair with
   `-c <scratch>`). Far fewer requests than `scan`; `scan` remains for targeted
   `--gav` lookups and immediacy.
@@ -172,7 +193,39 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   `${...}` properties, and projects resolvable direct edges into the concrete
   `dependencies` table (`pom_meta.deps_resolved`). First-cut — does **not** handle
   version ranges, profiles, `<exclusions>`, relocation, or inherited-metadata
-  coalescing (raw values stay in `pom_meta`).
+  coalescing (raw values stay in `pom_meta`). Like `mine`, it **streams** the worklist
+  in bounded keyset pages (ordered by `artifact_id`, `PAGE_SIZE=50_000`) so it runs in
+  constant memory on a full-Central backlog (the old path materialised the whole `todo`
+  list *and* cached every node — double OOM). The per-node work is DB-**read**-bound
+  (loading parent/BOM/property rows), so it's parallelised: `--threads` (default 8)
+  reader workers each own a `DuckDBConnection.duplicate()` connection (concurrent
+  readers over one in-process DB via MVCC) and only **read**, producing resolved child
+  ids / pending inserts; **all writes** (edge inserts, synthetic-artifact inserts,
+  `deps_resolved` updates) funnel through a single writer connection on the collector
+  thread, so DuckDB's single-writer rule still holds. This is the **only** place in the
+  codebase that opens concurrent DuckDB connections (`duplicate()`); `mine` instead
+  serialises because its workers do network I/O, not DB I/O. No network → no `--rate`.
+  Per-reader parent/id caches and the writer's id cache are bounded LRUs. **Before** the
+  per-node pass, a set-based fast path (`resolveSetBased`) resolves the context-free
+  majority in a few hash-join statements — (A) literal versions, (B) exact `${name}`
+  tokens defined concretely in the *same* POM's properties, (C) null versions pinned by
+  a concrete non-import managed entry in the *same* POM — synthesising missing targets,
+  inserting edges, and marking a POM resolved iff *every* dep is covered by A/B/C (the
+  marking predicate is the exact complement of the passes). This matters because DuckDB
+  table-scans `WHERE artifact_id = ?`/`(gid,aid)` filters (it won't use a secondary ART
+  index for them — so per-`artifact_id` indexes were tried and reverted as useless), so
+  the per-node path is scan-bound. A second set-based pass (`resolveInheritedSetBased`)
+  then resolves the **parent-chain** residue (~95% of unresolved POMs have a parent): a
+  recursive CTE over parent links builds per-node effective properties (nearest wins +
+  `${other}` interpolation) and effective non-import managed versions (interpolated via
+  those props), resolves each dep (literal / `${name}` / null-managed), and marks a POM
+  resolved iff every dep is concrete. It also resolves **import BOMs transitively** (the
+  import graph is followed to a fixpoint up to `BOM_DEPTH` levels, so BOM-of-BOM resolves;
+  each reached BOM's effective managed versions — BOM + its parent chain — are computed once
+  and attributed to consumers by join; parent-chain managed wins over BOM). Runs in bounded
+  keyset batches (`INHERITED_BATCH`) so the per-node effective-property explosion doesn't OOM.
+  Only embedded/partial `${...}`, profiles, ranges, and exclusions fall through to the
+  per-node pass; `--set-based-only` skips that pass.
   `import-goblin` (`GraphImportCmd` → `GraphRepository.importGoblinEdges`) seeds
   `artifacts`/`dependencies` from a Goblin CSV export (Aether-resolved edges,
   equivalent to `graph deps`, for all of Central up to the dataset snapshot) via a
@@ -196,7 +249,8 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   VACUUM to reclaim space), `optimize` (secondary indexes on `artifacts(gid,aid)`,
   `dependencies(child_id)`, `meta_artifacts(gid,aid)`, `meta_versions(ga_id)` +
   the POM-mining coord indexes + `ANALYZE`), `views`
-  (create the `gav`, `dependents`, `version_ranges` convenience views), and
+  (create the `gav`, `dependents`, `version_ranges`, `released` convenience
+  views; `released` normalises `meta_versions.published` to a real `TIMESTAMP`), and
   `export` (`COPY` tables + `version_ranges` to parquet/csv/json via
   `-f/--format`, `-o/--out`). Implemented in `actions/DBAction.java`. (Replaced
   the old `.properties`→CSV dumper.)
@@ -217,6 +271,22 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
 - `analyse` — inspect the cache; subcommand `pom` (analyse local POMs in
   `~/.m2/repository`). (The `meta` subcommand was removed — use `graph stats` for
   discovery-metadata counts; `meta-csv` was removed too — use `db export`.)
+- `insights` (`insight`) — ecosystem-evolution analysis over `graph.db`, the
+  richer companion to the `graph stats` snapshot. Subcommands: `arrivals`
+  (coverage + versions/artifacts/groups per year), `lifecycle` (versions-per-artifact
+  stats, release-count + lifespan distributions, single-release share, update
+  frequency), `abandonment` (quiet-2y/5y + last-release-age survival curve), `churn`
+  (how often consecutive versions of an artifact bump a dependency they already
+  declare — new/removed deps excluded; resolved `dependencies` by default, `--raw`
+  uses declared `direct_dep` literals, `--top N`), `resolution` (`coverage`) (the
+  catalogued→mined→resolved funnel via `pom_meta.deps_resolved`, un-mined backlog,
+  and resolve-ran-but-no-edges POMs — "does everything have resolved deps?"), and
+  `report` (all, churn summary only). Shared opts `-g/--gav <group[:artifact]>` (subgroup-matching),
+  `--since`/`--until <year>`, `-f/--format table|csv|json`. `InsightsCmd` (CLI,
+  table/csv/json formatting) → `EcosystemStats` (core, read-only; SQL lives here so
+  it's unit-tested against a synthetic DuckDB). Time-based metrics parse the
+  ISO-8601 `published` string via `TRY_CAST(replace(...,'Z',''))`; `churn` is a
+  window pass over the dependency tables — scope it and run `db optimize` at scale.
 - `view` (`web`, `ui`) — launch the browser-based dependency viewer over the
   DuckDB graph. `-a/--address/--host` (default `127.0.0.1`), `-p/--port`
   (default `8080`, `0` = free port), `--no-open` to skip auto-launching a

@@ -216,12 +216,22 @@ public final class DBAction {
                         "FROM meta_artifacts a JOIN meta_versions v ON a.id = v.ga_id " +
                         "WHERE v.published IS NOT NULL " +
                         "GROUP BY a.gid, a.aid",
+                // released: one normalised row per dated version, with `published`
+                // parsed from its ISO-8601 string to a real TIMESTAMP (trailing 'Z'
+                // stripped). The 'insights' reports and any time-based ad-hoc query
+                // can build on this instead of repeating the TRY_CAST. Versions
+                // without a parseable publish date are excluded.
+                "CREATE OR REPLACE VIEW released AS " +
+                        "SELECT a.gid, a.aid, v.version, " +
+                        "TRY_CAST(replace(v.published, 'Z', '') AS TIMESTAMP) AS published " +
+                        "FROM meta_artifacts a JOIN meta_versions v ON a.id = v.ga_id " +
+                        "WHERE TRY_CAST(replace(v.published, 'Z', '') AS TIMESTAMP) IS NOT NULL",
         };
         try (Connection conn = open(); Statement st = conn.createStatement()) {
             for (String sql : ddl) {
                 st.execute(sql);
             }
-            System.out.println("Created views: gav, dependents, version_ranges");
+            System.out.println("Created views: gav, dependents, version_ranges, released");
             System.out.println("Query them with e.g.  graph query \"SELECT * FROM version_ranges LIMIT 10\"");
         } catch (SQLException e) {
             System.err.println("Creating views failed: " + e.getMessage());

@@ -46,4 +46,45 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- Copy the fat jar to a target machine after packaging:
+                 mvn package -Pdeploy-jar -Ddeploy.target=pi:
+             deploy.target is anything scp accepts (host:, user@host:/path, an
+             ~/.ssh/config alias, ...). Override the default below or pass -D. -->
+        <profile>
+            <id>deploy-jar</id>
+            <properties>
+                <deploy.target>asylum.local:~/cachegenie</deploy.target>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <executions>
+                            <execution>
+                                <id>scp-fat-jar</id>
+                                <!-- Same phase as shade; within a phase plugins run in
+                                     POM order, and this profile plugin is appended after
+                                     the shade plugin, so the jar exists by now. -->
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>scp</executable>
+                                    <arguments>
+                                        <argument>${project.basedir}/../target/cachegenie.jar</argument>
+                                        <argument>${deploy.target}</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

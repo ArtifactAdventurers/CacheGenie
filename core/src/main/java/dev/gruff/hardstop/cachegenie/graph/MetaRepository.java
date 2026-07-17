@@ -57,6 +57,35 @@ public class MetaRepository {
         return DriverManager.getConnection("jdbc:duckdb:" + dbPath);
     }
 
+    /**
+     * Point DuckDB at an explicit spill directory (next to the database), stream large
+     * {@code INSERT ... SELECT} results instead of buffering them to preserve row order,
+     * and optionally cap DuckDB's memory/threads — so a big set-based merge spills to
+     * disk rather than exhausting RAM alongside the JVM (the OS OOM-killer trap the
+     * {@code index-sync} full merge hit at ~20M staged records). Mirrors
+     * {@code PomResolver.applyMemoryGuards}; settings are DB-wide while the database is
+     * open in this process. Best-effort: failures are logged and work proceeds on
+     * defaults.
+     */
+    private void applyMemoryGuards(Connection conn, String memLimit, int dbThreads) {
+        String tempDir = (dbPath + ".tmp").replace("'", "''");
+        try (Statement st = conn.createStatement()) {
+            st.execute("SET temp_directory = '" + tempDir + "'");
+            try { st.execute("SET preserve_insertion_order = false"); } catch (SQLException ignore) { /* older DuckDB */ }
+            if (dbThreads > 0) {
+                st.execute("SET threads = " + dbThreads);
+            }
+            if (memLimit != null && !memLimit.isBlank()) {
+                st.execute("SET memory_limit = '" + memLimit.trim().replace("'", "''") + "'");
+            }
+            log.info("Index-stage DB guards: memory_limit={}, threads={}, preserve_insertion_order=false, temp_directory={}.tmp",
+                    (memLimit != null && !memLimit.isBlank()) ? memLimit.trim() : "<default ~80% RAM>",
+                    dbThreads > 0 ? dbThreads : "<default: one per core>", dbPath);
+        } catch (SQLException e) {
+            log.warn("Could not apply DuckDB memory guards (continuing on defaults): {}", e.getMessage());
+        }
+    }
+
     private void initSchema() {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement()) {
@@ -554,7 +583,19 @@ public class MetaRepository {
      * for the duration; run {@code db compact --rewrite} afterwards to reclaim it.
      */
     public IndexStageLoader openIndexStage() throws SQLException {
-        return new IndexStageLoader();
+        return new IndexStageLoader(null, 0);
+    }
+
+    /**
+     * Like {@link #openIndexStage()} but with explicit DuckDB memory guards for a
+     * large merge: {@code memLimit} caps DuckDB's memory (e.g. {@code "8GB"}; null/blank
+     * = DuckDB default of ~80% RAM) and {@code dbThreads} caps its worker threads
+     * (0 = default). A spill {@code temp_directory} next to the DB and
+     * {@code preserve_insertion_order = false} are always applied (best-effort), so
+     * the set-based merge spills to disk instead of exhausting RAM alongside the JVM.
+     */
+    public IndexStageLoader openIndexStage(String memLimit, int dbThreads) throws SQLException {
+        return new IndexStageLoader(memLimit, dbThreads);
     }
 
     /** Bulk staging loader; see {@link #openIndexStage()}. Not thread-safe. */
@@ -563,8 +604,9 @@ public class MetaRepository {
         private final org.duckdb.DuckDBAppender appender;
         private boolean appenderClosed = false;
 
-        private IndexStageLoader() throws SQLException {
+        private IndexStageLoader(String memLimit, int dbThreads) throws SQLException {
             conn = getConnection();
+            applyMemoryGuards(conn, memLimit, dbThreads);
             try (Statement st = conn.createStatement()) {
                 st.execute("DROP TABLE IF EXISTS idx_stage");
                 st.execute("CREATE TABLE idx_stage (" +
@@ -602,8 +644,12 @@ public class MetaRepository {
         /**
          * Flush staging and merge into the meta tables, then drop staging. For each
          * (gid,aid,version) the representative file is the largest staged record (the
-         * main jar over its pom), and its fields populate the version row.
-         * @return {@code [newArtifacts, newVersions]}.
+         * main jar over its pom), and its fields populate the version row. An existing
+         * version row is upgraded when the staged record's file is strictly larger
+         * (largest-wins holds across batched merges of one pull; a jar record arriving
+         * in a later batch replaces the pom record's fields from an earlier one) —
+         * {@code missing_pom} is never touched, and {@code published} only fills a gap.
+         * @return {@code [newArtifacts, newOrUpgradedVersions]}.
          */
         public long[] merge() throws SQLException {
             if (!appenderClosed) {
@@ -632,7 +678,22 @@ public class MetaRepository {
                         "  FROM idx_stage" +
                         ") m JOIN meta_artifacts a ON a.gid = m.gid AND a.aid = m.aid " +
                         "WHERE m.rn = 1 " +
-                        "ON CONFLICT (ga_id, version) DO NOTHING");
+                        // Largest-file-wins across merges too: upgrade an existing row's
+                        // main-artifact fields when the staged file is strictly larger
+                        // (e.g. the jar record lands in a later batch than the pom's).
+                        // Never touches missing_pom (owned by fetch/mine); published only
+                        // fills a gap. rn = 1 guarantees one row per key per statement
+                        // (DuckDB rejects duplicate conflict keys in a single INSERT).
+                        "ON CONFLICT (ga_id, version) DO UPDATE SET " +
+                        "packaging = excluded.packaging, " +
+                        "file_extension = excluded.file_extension, " +
+                        "file_size = excluded.file_size, " +
+                        "sha1 = excluded.sha1, " +
+                        "sha256 = excluded.sha256, " +
+                        "has_sources = excluded.has_sources, " +
+                        "has_javadoc = excluded.has_javadoc, " +
+                        "published = COALESCE(excluded.published, published) " +
+                        "WHERE COALESCE(excluded.file_size, 0) > COALESCE(file_size, 0)");
                 // Refresh artifact-level summary (generated/latest/release) for the
                 // artifacts in this sync. latest = version with the most recent
                 // publish date (Maven's "last deployed" semantics); release = same

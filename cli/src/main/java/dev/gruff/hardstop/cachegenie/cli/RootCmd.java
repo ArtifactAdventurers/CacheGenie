@@ -31,7 +31,8 @@ import java.net.URI;
                 "",
                 "Analysis:",
                 "  - graph query      : Execute SQL (incl. recursive CTEs) against the DuckDB graph.",
-                "  - graph stats      : Graph and discovery-metadata statistics.",
+                "  - graph stats      : Graph and discovery-metadata statistics (quick snapshot).",
+                "  - insights         : Ecosystem evolution reports (arrivals, lifecycle, abandonment, dependency churn).",
                 "",
                 "Data Locations:",
                 "  - Local Repository : Artifacts (JARs/POMs) in your Maven repository (default: ~/.m2/repository).",
@@ -42,7 +43,7 @@ import java.net.URI;
                 "  cachegenie graph mine --since 30d --rate 60",
                 "  cachegenie graph resolve"
         },
-        subcommands = {IndexCmd.class, SyncIndexCmd.class, DBCmd.class, CompareCmd.class, CacheCmd.class, GraphCmd.class, MetaCmd.class, MetadataCmd.class, AnalyseCmd.class, ViewCmd.class})
+        subcommands = {IndexCmd.class, SyncIndexCmd.class, DBCmd.class, CompareCmd.class, CacheCmd.class, GraphCmd.class, MetaCmd.class, MetadataCmd.class, AnalyseCmd.class, InsightsCmd.class, ViewCmd.class})
 
 public class RootCmd  {
 

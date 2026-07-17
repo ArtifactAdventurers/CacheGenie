@@ -278,6 +278,7 @@ hand-written joins.
 | `gav` | `artifacts` with a single `gid:aid:version` string column. |
 | `dependents` | Every dependency edge flattened to readable coordinates: `dep_*` (the depended-upon artifact), `by_*` (the artifact that depends on it), and `scope`. |
 | `version_ranges` | Per group:artifact `version_count`, `first_published`, `last_published` over `meta_versions` (the successor to the old `range.db` CSV dump). |
+| `released` | One row per *dated* version (`gid`, `aid`, `version`, `published`), with `published` parsed from its ISO-8601 string to a real `TIMESTAMP` (trailing `Z` stripped); versions without a parseable date are excluded. Lets the `insights` reports and time-based ad-hoc queries skip repeating the `TRY_CAST`. |
 
 ## Sequences
 - `seq_artifact_id`: Used to generate unique IDs for the `artifacts` table.

@@ -122,13 +122,25 @@ compare -g <group> -a <artifact> -v <version> [-v <version> ...]
 Builds, resolves, and queries the dependency graph. Subcommands:
 
 -   **`graph mine`**: Fetch each catalogue version's POM (one GET, no fan-out) and store its raw facts + direct dependencies.
--   **`graph resolve`**: Project mined POMs into concrete dependency edges.
+-   **`graph resolve`**: Project mined POMs into concrete dependency edges (parent/BOM/property resolution). Resolves almost everything **set-based**: first the context-free majority (literal versions, same-POM `${property}`/managed), then the inherited residue via recursive CTEs — parent-chain effective properties + managed versions, and import BOMs resolved transitively (BOM-of-BOM, each distinct BOM's managed versions computed once and attributed to consumers). Only embedded `${...}`, profiles, version ranges, and exclusions fall through to the parallel per-node pass (`--threads <n>`, default 8). `--set-based-only` skips the per-node pass. No network, so no `--rate`. Run after `graph mine`; idempotent and resumable.
 -   **`graph deps`**: Build the direct-dependency graph for targeted/recent versions via an Aether descriptor read.
 -   **`graph query`**: Run SQL (including recursive CTEs for transitive deps) against the DuckDB graph.
 -   **`graph stats`**: Print graph and discovery-metadata statistics.
 -   **`graph import-goblin` / `graph export-neo4j` / `graph push-neo4j`**: Seed from a Goblin CSV, or sync to a Neo4j read-side (see `GOBLIN-IMPORT.md`, `HYBRID-NEO4J.md`).
 
 To get a dependency graph for a GAV out of the database, use `graph query` with a recursive CTE (or `graph stats` for summaries).
+
+#### `insights` (alias: `insight`)
+Ecosystem-evolution analysis over the DuckDB database — the "how does software arrive, evolve, update its dependencies, and get abandoned" reports. A richer companion to the quick `graph stats` snapshot; opens the database read-only. Subcommands:
+
+-   **`insights arrivals`**: Catalogue coverage (how many versions actually have a publish date) and arrival rate over time — versions, new artifacts, and new groups per year.
+-   **`insights lifecycle`**: Versions per artifact (mean/median/p90/p99), the release-count distribution, the single-release ("one and done") share, lifespan first→last, and update frequency (releases/year and the gap between releases).
+-   **`insights abandonment`**: How many artifacts have gone quiet (no release in 2y/5y), a last-release-age survival curve, and whether single-release artifacts skew older.
+-   **`insights churn`**: How often consecutive versions of an artifact **bump the version of a dependency they already declare** (new/removed deps excluded). Uses resolved `dependencies` edges by default (`graph resolve`); `--raw` uses as-declared `direct_dep` literals (`graph mine` only). `--top N` also lists the most-frequently-bumped dependencies.
+-   **`insights resolution`** (alias `coverage`): How much of the catalogue has been mined and resolved — the catalogued→mined→resolved funnel (via `pom_meta.deps_resolved`), the un-mined backlog, and POMs that resolve ran on but whose declared deps produced no edge (ranges/properties/profiles the first-cut resolver skips). Use this to answer "does everything have resolved dependencies yet?".
+-   **`insights report`**: Runs arrivals + lifecycle + abandonment + churn (summary) + resolution in one pass.
+
+All subcommands accept `-g/--gav <group[:artifact]>` (group matches its subgroups too), `--since`/`--until <year>`, and `-f/--format table|csv|json`. Time-based metrics parse `meta_versions.published` (an ISO-8601 string) to a timestamp; check `insights arrivals` coverage before trusting the rates. The `churn` reports are window-function passes over the dependency tables — scope them with `-g`/`--since` and run `db optimize` first at full-Central scale.
 
 ## Database Schema
 

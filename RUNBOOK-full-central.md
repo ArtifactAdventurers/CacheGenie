@@ -49,8 +49,27 @@ tables (collapsing ~100M file-records to distinct versions once). The earlier
 per-row path took ~24h; the staged path is far faster.
 
 ```bash
-cg index-sync --full
+cg index-sync --full --mem-limit 8GB
 ```
+
+**Set `--mem-limit` below RAM-minus-JVM-heap.** The merge otherwise lets DuckDB
+claim its default ~80% of RAM on top of the JVM heap and the OS OOM-killer ends
+the run at the `merging…` step. A spill `temp_directory` (next to `graph.db`)
+and `preserve_insertion_order = false` are applied automatically, and the full
+pull merges every `--merge-batch` staged records (default 5,000,000) so peak
+merge memory is bounded by batch size, not pull size.
+
+On a small-RAM box (e.g. an 8GB Raspberry Pi), squeeze everything:
+
+```bash
+java -Xmx1g -jar cachegenie.jar -r <mirror> -P index-sync --full \
+    --mem-limit 3GB --db-threads 2 --merge-batch 2000000
+```
+
+(`-Xmx1g` frees the JVM's default 25%-of-RAM heap claim — the sync itself needs
+very little heap; `--db-threads 2` halves the per-thread hash tables; a smaller
+`--merge-batch` shrinks each merge's working set. Spill I/O will be slow on an
+SD card — prefer a USB SSD for `graph.db`.)
 
 Smoke-test the full path quickly without committing sync state:
 
