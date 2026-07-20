@@ -3,11 +3,14 @@ package dev.gruff.hardstop.cachegenie.cli;
 import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.graph.GraphRepository;
 import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
+import dev.gruff.hardstop.cachegenie.graph.Sqlite;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.sql.*;
 
 
@@ -18,48 +21,72 @@ public class GraphCmd  {
     @CommandLine.ParentCommand
     RootCmd parent;
 
-    @CommandLine.Command(name = "query", description = "Run SQL (incl. recursive CTEs for transitive deps) against the DuckDB graph")
+    @CommandLine.Command(name = "query", description = "Run SQL (SQLite dialect, incl. recursive CTEs for transitive deps) against the graph database")
     public static class GraphQueryCmd implements Runnable {
 
         @CommandLine.ParentCommand
         GraphCmd parent;
 
-        @CommandLine.Parameters(index = "0", description = "SQL query to execute", defaultValue = "SELECT * FROM artifacts LIMIT 10")
+        @CommandLine.Parameters(index = "0", arity = "0..1",
+                description = "SQL query to execute (omit when using -f/--file)")
         String query;
 
+        @CommandLine.Option(names = {"-f", "--file"}, paramLabel = "FILE",
+                description = "Read the SQL query from a file instead of the command line " +
+                        "(handy for long or multi-line ad-hoc queries)")
+        File queryFile;
+
         @CommandLine.Option(names = {"-w", "--write"}, description = "Open the database read-write (needed for INSERT/UPDATE/DDL). " +
-                "By default 'query' opens read-only so it never takes a write lock; note that a read-write open cannot proceed while another process (e.g. 'graph deps') holds the database.")
+                "By default 'query' opens read-only.")
         boolean write = false;
 
         @Override
         public void run() {
             CacheGenie cg = parent.parent.genie();
-            File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
+            String dbPath = Sqlite.dbPath(cg.cacheGenieRoot());
+            File dbFile = new File(dbPath);
             if (!dbFile.exists()) {
                 System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
                 System.out.println("Run 'graph mine' + 'graph resolve' first to populate the database.");
                 return;
             }
 
-            // Default to a READ-ONLY open so an ad-hoc query never takes a write
-            // lock (and can run while the DB is otherwise idle). Schema migrations
-            // require a writer, so only run them on the --write path; a read-only
-            // query against an older DB simply sees whatever columns exist.
-            java.util.Properties props = new java.util.Properties();
+            String sql;
+            if (queryFile != null) {
+                if (query != null) {
+                    System.err.println("Specify either a SQL query argument or -f/--file, not both.");
+                    return;
+                }
+                try {
+                    sql = Files.readString(queryFile.toPath()).trim();
+                } catch (IOException e) {
+                    System.err.println("Failed to read SQL file " + queryFile + ": " + e.getMessage());
+                    return;
+                }
+                if (sql.isEmpty()) {
+                    System.err.println("SQL file " + queryFile + " is empty.");
+                    return;
+                }
+            } else {
+                sql = (query == null || query.isBlank()) ? "SELECT * FROM artifacts LIMIT 10" : query;
+            }
+
+            // Default to a READ-ONLY open so an ad-hoc query can never mutate the
+            // database by accident. Schema migrations require a writer, so only
+            // run them on the --write path; a read-only query against an older DB
+            // simply sees whatever columns exist.
             if (write) {
                 // Ensure both schemas (incl. any column migrations) exist so an
                 // ad-hoc query doesn't trip on a DB created before a column was added.
                 new GraphRepository(cg.cacheGenieRoot());
                 new MetaRepository(cg.cacheGenieRoot());
-            } else {
-                props.setProperty("duckdb.read_only", "true");
             }
 
-            log.debug("Executing query ({}): {}", write ? "read-write" : "read-only", query);
-            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath(), props);
+            log.debug("Executing query ({}): {}", write ? "read-write" : "read-only", sql);
+            try (Connection conn = write ? Sqlite.open(dbPath) : Sqlite.openReadOnly(dbPath);
                  Statement stmt = conn.createStatement()) {
 
-                boolean hasResultSet = stmt.execute(query);
+                boolean hasResultSet = stmt.execute(sql);
                 if (hasResultSet) {
                     try (ResultSet rs = stmt.getResultSet()) {
                         ResultSetMetaData metaData = rs.getMetaData();
@@ -92,19 +119,7 @@ public class GraphCmd  {
                 }
 
             } catch (SQLException e) {
-                String msg = e.getMessage();
-                if (msg != null && (msg.contains("Conflicting lock") || msg.contains("Could not set lock"))) {
-                    System.err.println("graph.db is locked by another CacheGenie process (most likely a running 'graph deps').");
-                    if (write) {
-                        System.err.println("A read-write query cannot attach while it is held; drop --write to query read-only,");
-                        System.err.println("or wait for that run to finish.");
-                    } else {
-                        System.err.println("DuckDB cannot attach (even read-only) while another process holds it read-write;");
-                        System.err.println("wait for that run to finish.");
-                    }
-                } else {
-                    System.err.println("SQL Error: " + msg);
-                }
+                System.err.println("SQL Error: " + e.getMessage());
                 log.error("Failed to execute query", e);
             }
         }
@@ -119,48 +134,33 @@ public class GraphCmd  {
         @Override
         public void run() {
             CacheGenie cg = parent.parent.genie();
-            File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
+            String dbPath = Sqlite.dbPath(cg.cacheGenieRoot());
+            File dbFile = new File(dbPath);
             if (!dbFile.exists()) {
                 System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
                 System.out.println("Run 'graph mine' + 'graph resolve' first to populate the database.");
                 return;
             }
 
-            // Open READ-ONLY. 'stats' is a pure reader, so it must not take a
-            // write lock - that would block, and be blocked by, a running
-            // 'graph deps'. The trade-off is that we cannot run schema
-            // migrations here, so we tolerate absent tables/columns instead: a
-            // DB created by only 'scan' has just the meta tables; one created by
-            // only 'graph deps'/'mine' has just the graph tables.
-            //
-            // NOTE: DuckDB still refuses to open a file (even read-only) while
-            // another process holds it read-write, so this does not let 'stats'
-            // run *during* a 'graph deps' run - it just avoids 'stats' itself
-            // ever taking a write lock. See the lock-conflict message below.
-            java.util.Properties props = new java.util.Properties();
-            props.setProperty("duckdb.read_only", "true");
-
+            // Open READ-ONLY. 'stats' is a pure reader; under WAL it runs happily
+            // alongside a concurrent writer (e.g. 'graph deps'). The trade-off is
+            // that we cannot run schema migrations here, so we tolerate absent
+            // tables/columns instead: a DB created by only 'scan' has just the
+            // meta tables; one created by only 'graph deps'/'mine' has just the
+            // graph tables.
             System.out.println("Graph Database Statistics");
             System.out.println("-------------------------");
             System.out.println("Location: " + dbFile.getAbsolutePath());
             System.out.println("Size: " + (dbFile.length() / 1024) + " KB");
 
-            try (Connection conn = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath(), props);
+            try (Connection conn = Sqlite.openReadOnly(dbPath);
                  Statement stmt = conn.createStatement()) {
 
                 graphStats(stmt);
                 metaStats(stmt);
 
             } catch (SQLException e) {
-                String msg = e.getMessage();
-                if (msg != null && (msg.contains("Conflicting lock") || msg.contains("Could not set lock"))) {
-                    System.err.println();
-                    System.err.println("graph.db is locked by another CacheGenie process (most likely a running 'graph deps').");
-                    System.err.println("DuckDB permits only a single read-write process and no concurrent access while it is");
-                    System.err.println("held, so 'stats' cannot attach until that run finishes.");
-                } else {
-                    System.err.println("SQL Error: " + msg);
-                }
+                System.err.println("SQL Error: " + e.getMessage());
                 log.error("Failed to gather statistics", e);
             }
         }

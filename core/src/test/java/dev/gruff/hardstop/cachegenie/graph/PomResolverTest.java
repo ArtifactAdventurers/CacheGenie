@@ -7,7 +7,6 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 
@@ -16,13 +15,21 @@ import static org.junit.Assert.assertTrue;
 
 /**
  * Drives the streamed, multi-threaded {@link PomResolver} over a small synthetic
- * mined graph that exercises every resolution path:
+ * mined graph that exercises every resolution path (all through the per-node pass —
+ * the only pass, now that SQLite serves indexed point lookups):
  * <ul>
+ *   <li>literal versions (incl. a synthetic-artifact insert),</li>
+ *   <li>same-POM property tokens and same-POM managed versions,</li>
  *   <li>parent-chain property inheritance ({@code ${guava.version}} → managed version),</li>
- *   <li>import-scope BOM managed versions (junit via org.bom:bom),</li>
- *   <li>a literal version targeting a coordinate that is not yet an artifact (synthetic insert),</li>
+ *   <li>import-scope BOM managed versions (junit via org.bom:bom), incl. BOM
+ *       properties and transitive BOM-of-BOM,</li>
  *   <li>an unresolvable {@code ${missing}} token (counted, no edge).</li>
  * </ul>
+ *
+ * <p>The database is a per-test temp file (deleted by the {@link TemporaryFolder}
+ * rule) opened via the {@link Sqlite} helper. The schema is created here directly so
+ * the test is self-contained; shapes mirror {@code GraphRepository}'s DDL
+ * ({@code CREATE TABLE IF NOT EXISTS} keeps the two compatible).
  */
 public class PomResolverTest {
 
@@ -35,18 +42,18 @@ public class PomResolverTest {
     @Before
     public void setUp() throws Exception {
         root = tempFolder.getRoot();
-        new GraphRepository(root); // creates artifacts, dependencies, pom_meta, mining tables, seq_artifact_id
-        db = new File(root, "graph.db").getAbsolutePath();
+        db = Sqlite.dbPath(root);
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.open(db);
              Statement st = c.createStatement()) {
+            createSchema(st);
             // Artifacts: 1=parent, 2=child, 3=guava (exists), 4=junit (exists), 5=bom.
+            // (id is an INTEGER PRIMARY KEY rowid alias: explicit ids here, and synthetic
+            // inserts later get max(rowid)+1 — no sequence, no collision.)
             st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES " +
                     "(1,'org.ex','parent','1.0',''),(2,'org.ex','child','2.0','')," +
                     "(3,'com.google.guava','guava','30.0',''),(4,'junit','junit','4.13','')," +
                     "(5,'org.bom','bom','5.0','')");
-            // Advance the artifact-id sequence past the manual ids so a synthetic insert can't collide.
-            st.execute("SELECT nextval('seq_artifact_id') FROM range(5)");
 
             st.execute("INSERT INTO pom_meta (artifact_id, parent_gid, parent_aid, parent_version) VALUES " +
                     "(1,NULL,NULL,NULL),(2,'org.ex','parent','1.0'),(5,NULL,NULL,NULL)");
@@ -63,6 +70,35 @@ public class PomResolverTest {
         }
     }
 
+    /** Minimal copy of the production tables the resolver touches (see {@code GraphRepository}). */
+    private static void createSchema(Statement st) throws Exception {
+        st.execute("CREATE TABLE IF NOT EXISTS artifacts (" +
+                "id INTEGER PRIMARY KEY, gid VARCHAR, aid VARCHAR, version VARCHAR, classifier VARCHAR, " +
+                "UNIQUE (gid, aid, version, classifier))");
+        st.execute("CREATE TABLE IF NOT EXISTS dependencies (" +
+                "parent_id INTEGER, child_id INTEGER, scope VARCHAR, " +
+                "PRIMARY KEY (parent_id, child_id, scope))");
+        st.execute("CREATE TABLE IF NOT EXISTS pom_meta (" +
+                "artifact_id INTEGER PRIMARY KEY, packaging VARCHAR, " +
+                "parent_gid VARCHAR, parent_aid VARCHAR, parent_version VARCHAR, parent_relpath VARCHAR, " +
+                "name VARCHAR, description VARCHAR, url VARCHAR, inception_year VARCHAR, " +
+                "organization_name VARCHAR, organization_url VARCHAR, " +
+                "scm_url VARCHAR, scm_connection VARCHAR, scm_dev_connection VARCHAR, scm_tag VARCHAR, " +
+                "issue_system VARCHAR, issue_url VARCHAR, ci_system VARCHAR, ci_url VARCHAR, " +
+                "mined_at VARCHAR, deps_resolved INTEGER DEFAULT 0, meta_resolved INTEGER DEFAULT 0)");
+        st.execute("CREATE TABLE IF NOT EXISTS direct_dep (" +
+                "artifact_id INTEGER, ord INTEGER, dep_gid VARCHAR, dep_aid VARCHAR, dep_version VARCHAR, " +
+                "scope VARCHAR, dep_type VARCHAR DEFAULT 'jar', dep_classifier VARCHAR DEFAULT '', " +
+                "optional INTEGER DEFAULT 0, PRIMARY KEY (artifact_id, ord))");
+        st.execute("CREATE TABLE IF NOT EXISTS dependency_management (" +
+                "artifact_id INTEGER, ord INTEGER, dep_gid VARCHAR, dep_aid VARCHAR, dep_version VARCHAR, " +
+                "scope VARCHAR, dep_type VARCHAR DEFAULT 'jar', dep_classifier VARCHAR DEFAULT '', " +
+                "PRIMARY KEY (artifact_id, ord))");
+        st.execute("CREATE TABLE IF NOT EXISTS pom_properties (" +
+                "artifact_id INTEGER, prop_key VARCHAR, prop_value VARCHAR, " +
+                "PRIMARY KEY (artifact_id, prop_key))");
+    }
+
     @Test
     public void resolvesParentBomAndPropertyThreaded() throws Exception {
         PomResolver.ResolveStats stats = new PomResolver(root).resolveAll(false, 4);
@@ -70,7 +106,7 @@ public class PomResolverTest {
         assertEquals("all three mined nodes processed", 3, stats.nodes());
         assertEquals("one unresolvable ${missing} dep", 1, stats.unresolved());
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement()) {
             // child(2) should have exactly three resolved edges
             try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies WHERE parent_id = 2")) {
@@ -88,8 +124,9 @@ public class PomResolverTest {
                 rs.next();
                 assertEquals("synthetic artifact created", 1, rs.getInt(1));
             }
-            // everything mined is now marked resolved
-            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM pom_meta WHERE deps_resolved = FALSE")) {
+            // everything mined is now marked resolved (a processed node is marked even
+            // when some of its deps stayed unresolved — they're counted, not re-chewed)
+            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM pom_meta WHERE deps_resolved = 0")) {
                 rs.next();
                 assertEquals(0, rs.getInt(1));
             }
@@ -101,7 +138,7 @@ public class PomResolverTest {
         new PomResolver(root).resolveAll(false, 2);
         // --all re-runs every node; INSERT OR IGNORE means edges don't duplicate.
         new PomResolver(root).resolveAll(true, 2);
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies WHERE parent_id = 2")) {
             rs.next();
@@ -110,12 +147,11 @@ public class PomResolverTest {
     }
 
     @Test
-    public void literalOnlyPomResolvedSetBased() throws Exception {
+    public void literalOnlyPomResolved() throws Exception {
         // A POM with only literal, concrete versions — one to an existing artifact,
-        // one to a coordinate that must be synthesised — should be fully resolved by
-        // the set-based fast path (no parent/property/management needed). Manual ids
-        // are high so they can't collide with sequence-assigned synthetic ids.
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        // one to a coordinate that must be synthesised. Manual ids are high so they
+        // can't collide with the rowids assigned to synthetic inserts.
+        try (Connection c = Sqlite.open(db);
              Statement st = c.createStatement()) {
             st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES " +
                     "(50,'org.lit','app','1.0',''),(51,'org.lib','present','2.0','')");
@@ -127,7 +163,7 @@ public class PomResolverTest {
 
         new PomResolver(root).resolveAll(false, 4);
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement()) {
             try (ResultSet rs = st.executeQuery("SELECT deps_resolved FROM pom_meta WHERE artifact_id = 50")) {
                 rs.next();
@@ -143,11 +179,10 @@ public class PomResolverTest {
     }
 
     @Test
-    public void samePomPropertyAndManagedResolvedSetBased() throws Exception {
+    public void samePomPropertyAndManagedResolved() throws Exception {
         // POM 60: a dep whose version is exactly ${lib.version} defined in this POM,
-        //         and a dep with no version pinned by this POM's own dependencyManagement.
-        // Both are context-free (same-POM), so the set-based pass should fully resolve it.
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        // and a dep with no version pinned by this POM's own dependencyManagement.
+        try (Connection c = Sqlite.open(db);
              Statement st = c.createStatement()) {
             st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES " +
                     "(60,'org.app','svc','1.0',''),(61,'org.lib','byprop','7.0',''),(62,'org.lib','bymgmt','8.0','')");
@@ -162,11 +197,11 @@ public class PomResolverTest {
 
         new PomResolver(root).resolveAll(false, 4);
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement()) {
             try (ResultSet rs = st.executeQuery("SELECT deps_resolved FROM pom_meta WHERE artifact_id = 60")) {
                 rs.next();
-                assertTrue("same-POM property+managed POM fully resolved set-based", rs.getBoolean(1));
+                assertTrue("same-POM property+managed POM fully resolved", rs.getBoolean(1));
             }
             assertEdge(st, 60, "org.lib", "byprop", "7.0", "compile"); // via ${lib.version}
             assertEdge(st, 60, "org.lib", "bymgmt", "8.0", "compile"); // via same-POM dependencyManagement
@@ -175,10 +210,10 @@ public class PomResolverTest {
 
     @Test
     public void duplicateDeclaredDependencyResolvesToOneEdge() throws Exception {
-        // A POM may declare the same dependency twice (direct_dep keeps both rows). The
-        // set-based edge insert must SELECT DISTINCT so it doesn't emit duplicate
-        // (parent_id, child_id, scope) tuples in one command (which DuckDB rejects).
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        // A POM may declare the same dependency twice (direct_dep keeps both rows).
+        // The reader de-dups per node and the edge insert is INSERT OR IGNORE, so the
+        // duplicate collapses to a single (parent_id, child_id, scope) edge.
+        try (Connection c = Sqlite.open(db);
              Statement st = c.createStatement()) {
             st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES " +
                     "(70,'org.dup','app','1.0',''),(71,'org.dup','lib','5.0','')");
@@ -190,7 +225,7 @@ public class PomResolverTest {
 
         new PomResolver(root).resolveAll(false, 4); // must not throw
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies WHERE parent_id = 70")) {
             rs.next();
@@ -199,12 +234,12 @@ public class PomResolverTest {
     }
 
     @Test
-    public void inheritedParentChainResolvedSetBased() throws Exception {
+    public void inheritedParentChainResolved() throws Exception {
         // grandparent (80) defines a property and a managed version that uses it;
         // parent (81) inherits from it; kid (82) has a null-version dep that must be
-        // resolved from the GRANDPARENT's dependencyManagement + property. This is
-        // pure parent-chain inheritance — resolvable by the set-based inherited pass.
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        // resolved from the GRANDPARENT's dependencyManagement + property — pure
+        // parent-chain inheritance through the per-node walk.
+        try (Connection c = Sqlite.open(db);
              Statement st = c.createStatement()) {
             st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES " +
                     "(80,'g','gp','1',''),(81,'g','par','1',''),(82,'g','kid','1','')");
@@ -217,14 +252,13 @@ public class PomResolverTest {
                     "(82,0,'org.dep','lib',NULL,NULL,NULL,NULL)");
         }
 
-        // set-based only: the inherited pass must resolve POM 82 with no per-node work.
-        new PomResolver(root).resolveAll(false, 2, true);
+        new PomResolver(root).resolveAll(false, 2);
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement()) {
             try (ResultSet rs = st.executeQuery("SELECT deps_resolved FROM pom_meta WHERE artifact_id = 82")) {
                 rs.next();
-                assertTrue("kid resolved via grandparent dm + property, set-based", rs.getBoolean(1));
+                assertTrue("kid resolved via grandparent dm + property", rs.getBoolean(1));
             }
             // grandparent-managed version ${dep.ver}=9.9 -> org.dep:lib:9.9 (synthesised)
             assertEdge(st, 82, "org.dep", "lib", "9.9", "compile");
@@ -232,12 +266,13 @@ public class PomResolverTest {
     }
 
     @Test
-    public void importBomManagedResolvedSetBased() throws Exception {
+    public void importBomManagedResolved() throws Exception {
         // Spring-style import BOM: a BOM (90) manages spring-core via its own property; a
         // company parent (91) imports that BOM (version via an inherited property); an app
-        // (92) inherits the import and has a null-version spring-core dep. The BOM pass must
-        // resolve it — including when the consumer only inherits the import via its parent.
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        // (92) inherits the import and has a null-version spring-core dep. The BOM walk must
+        // resolve it — the BOM's managed version is interpolated in the BOM's OWN property
+        // context, and the import is picked up via the consumer's parent.
+        try (Connection c = Sqlite.open(db);
              Statement st = c.createStatement()) {
             st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES " +
                     "(90,'org.boot','deps','3.1.0',''),(91,'com.co','parent','1',''),(92,'com.co','app','1',''),(93,'org.sf','core','6.0.11','')");
@@ -252,24 +287,24 @@ public class PomResolverTest {
                     "(92,0,'org.sf','core',NULL,NULL,NULL,NULL)");
         }
 
-        new PomResolver(root).resolveAll(false, 2, true);
+        new PomResolver(root).resolveAll(false, 2);
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement()) {
             try (ResultSet rs = st.executeQuery("SELECT deps_resolved FROM pom_meta WHERE artifact_id = 92")) {
                 rs.next();
-                assertTrue("app resolved via inherited import BOM, set-based", rs.getBoolean(1));
+                assertTrue("app resolved via inherited import BOM", rs.getBoolean(1));
             }
             assertEdge(st, 92, "org.sf", "core", "6.0.11", "compile");
         }
     }
 
     @Test
-    public void transitiveBomOfBomResolvedSetBased() throws Exception {
+    public void transitiveBomOfBomResolved() throws Exception {
         // app imports an OUTER BOM which imports an INNER BOM (version via the outer BOM's
         // property); the INNER BOM actually manages the dep (via its own property). The
-        // transitive BOM closure must reach the inner BOM and resolve the dep.
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        // recursive BOM walk must reach the inner BOM and resolve the dep.
+        try (Connection c = Sqlite.open(db);
              Statement st = c.createStatement()) {
             st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES " +
                     "(94,'boot','outer','1.0',''),(95,'boot','inner','2.0',''),(96,'org.sf','core','6.0.11',''),(97,'co','app2','1','')");
@@ -285,9 +320,9 @@ public class PomResolverTest {
                     "(97,0,'org.sf','core',NULL,NULL,NULL,NULL)");
         }
 
-        new PomResolver(root).resolveAll(false, 2, true);
+        new PomResolver(root).resolveAll(false, 2);
 
-        try (Connection c = DriverManager.getConnection("jdbc:duckdb:" + db);
+        try (Connection c = Sqlite.openReadOnly(db);
              Statement st = c.createStatement()) {
             try (ResultSet rs = st.executeQuery("SELECT deps_resolved FROM pom_meta WHERE artifact_id = 97")) {
                 rs.next();

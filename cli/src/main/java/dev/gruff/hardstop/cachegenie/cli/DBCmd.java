@@ -8,8 +8,9 @@ import picocli.CommandLine;
 import java.io.File;
 
 @CommandLine.Command(name = "db",
-        description = "Manage the DuckDB graph database: compact, export, optimize, views",
-        subcommands = {DBCmd.CompactCmd.class, DBCmd.ExportCmd.class, DBCmd.OptimizeCmd.class, DBCmd.ViewsCmd.class})
+        description = "Manage the SQLite graph database: compact, export, optimize, views",
+        subcommands = {DBCmd.CompactCmd.class, DBCmd.ExportCmd.class, DBCmd.OptimizeCmd.class, DBCmd.ViewsCmd.class,
+                DBCmd.MigrateSqliteCmd.class})
 public class DBCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(DBCmd.class);
 
@@ -25,13 +26,13 @@ public class DBCmd implements Runnable {
         spec.commandLine().usage(System.out);
     }
 
-    @CommandLine.Command(name = "compact", description = "Checkpoint the DB; --rewrite rebuilds into a fresh, smaller file")
+    @CommandLine.Command(name = "compact", description = "Checkpoint the WAL and VACUUM the DB to reclaim space; --rewrite rebuilds into a fresh file")
     public static class CompactCmd implements Runnable {
         @CommandLine.ParentCommand
         DBCmd parent;
 
         @CommandLine.Option(names = "--rewrite",
-                description = "Rebuild the database into a fresh file to actually shrink it (keeps a .bak of the original)")
+                description = "Rebuild the database into a fresh file via VACUUM INTO (keeps a .bak of the original)")
         boolean rewrite;
 
         @Override
@@ -58,7 +59,7 @@ public class DBCmd implements Runnable {
         }
     }
 
-    @CommandLine.Command(name = "views", description = "Create convenience views (gav, dependents, version_ranges)")
+    @CommandLine.Command(name = "views", description = "Create convenience views (gav, dependents, version_ranges, released)")
     public static class ViewsCmd implements Runnable {
         @CommandLine.ParentCommand
         DBCmd parent;
@@ -70,14 +71,32 @@ public class DBCmd implements Runnable {
         }
     }
 
+    @CommandLine.Command(name = "migrate-sqlite",
+            description = "One-off copy of the legacy DuckDB graph.db into graph.sqlite (ids preserved, counts verified). "
+                    + "The DuckDB file is opened read-only and kept as a fallback.")
+    public static class MigrateSqliteCmd implements Runnable {
+        @CommandLine.ParentCommand
+        DBCmd parent;
+
+        @CommandLine.Option(names = "--force", description = "Replace an existing graph.sqlite.")
+        boolean force;
+
+        @Override
+        public void run() {
+            boolean ok = new dev.gruff.hardstop.cachegenie.actions.MigrateSqliteAction(parent.parent.genie()).migrate(force);
+            System.exit(ok ? 0 : 1);
+        }
+    }
+
     @CommandLine.Command(name = "export", description = "Export tables and the version_ranges view for external analysis")
     public static class ExportCmd implements Runnable {
         @CommandLine.ParentCommand
         DBCmd parent;
 
         @CommandLine.Option(names = {"-f", "--format"}, paramLabel = "FORMAT",
-                description = "parquet (default), csv, or json")
-        String format = "parquet";
+                description = "csv (default) or json. Parquet was removed with the move to SQLite; " +
+                        "for ad-hoc parquet, ATTACH the SQLite file from the standalone duckdb CLI.")
+        String format = "csv";
 
         @CommandLine.Option(names = {"-o", "--out"}, paramLabel = "DIR",
                 description = "Output directory (default: <cachegenie>/export)")

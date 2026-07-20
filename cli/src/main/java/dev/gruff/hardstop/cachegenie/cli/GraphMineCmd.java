@@ -4,6 +4,7 @@ import dev.gruff.hardstop.cachegenie.CacheGenie;
 import dev.gruff.hardstop.cachegenie.entities.MinedPom;
 import dev.gruff.hardstop.cachegenie.graph.GraphRepository;
 import dev.gruff.hardstop.cachegenie.graph.MetaRepository;
+import dev.gruff.hardstop.cachegenie.graph.Sqlite;
 import dev.gruff.hardstop.cachegenie.parsers.RawPomParser;
 import dev.gruff.hardstop.cachegenie.utils.Progress;
 import dev.gruff.hardstop.resolver.PomFetcher;
@@ -13,7 +14,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
-import java.io.File;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -77,15 +77,6 @@ public class GraphMineCmd implements Runnable {
             description = "Mine the ENTIRE un-mined catalogue (no --gav/--since filter). Required to run unfiltered — a guard against accidentally launching a full-Central crawl.")
     boolean all;
 
-    @CommandLine.Option(names = {"--mem-limit"}, paramLabel = "<size>",
-            description = "Cap DuckDB's memory for the mining writer, e.g. 2GB (default: DuckDB's ~80% of RAM). "
-                    + "Set it well below RAM minus the JVM's footprint on small machines — the flush merges join against the large pom tables.")
-    String memLimit;
-
-    @CommandLine.Option(names = {"--db-threads"}, paramLabel = "<n>",
-            description = "Cap DuckDB's worker threads for the mining writer (default: one per core).")
-    int dbThreads = 0;
-
     @CommandLine.Option(names = {"--limit"}, paramLabel = "<n>",
             description = "Stop after selecting N versions (0 = no limit). For polite, resumable chunks — re-running picks up where you left off since mined versions are excluded.")
     int limit = 0;
@@ -142,8 +133,9 @@ public class GraphMineCmd implements Runnable {
         // entire worklist into one List AND pre-submitted every task to an unbounded executor
         // queue while retaining every Future — that OOM'd on a full-Central run.) Per page we
         // read it (closing the read connection), then mine it through the worker pool with all
-        // DB writes funnelled to one drainer thread. The reader and writer are never open at the
-        // same time — the invariant graph mine/deps have always relied on.
+        // DB writes funnelled to one drainer thread. The reader and writer still don't overlap,
+        // but that is now just simplicity: under SQLite WAL a reader alongside the writer would
+        // be fine — the hard DuckDB-era correctness invariant no longer applies.
         final int PAGE_SIZE = 50_000;
 
         // Selector filters: each is {gid, aid, version} (aid/version null = wildcard).
@@ -222,16 +214,19 @@ public class GraphMineCmd implements Runnable {
                 cursor = page.get(page.size() - 1);
                 processed += page.size();
 
-                // All DB writes for THIS page funnel to ONE drainer thread (DuckDB single-writer);
-                // fetch workers only fetch+parse and hand results to the bounded queue, which
-                // back-pressures them if the writer falls behind. The writer is opened here (after
-                // the page read closed its connection) and flushed/closed when the page completes —
-                // so a reader and a writer are never open against graph.db at the same time.
+                // All DB writes for THIS page funnel to ONE drainer thread (a single writer
+                // connection keeps SQLite's write lock uncontended and the MiningWriter's
+                // batching simple); fetch workers only fetch+parse and hand results to the
+                // bounded queue, which back-pressures them if the writer falls behind. The
+                // writer is opened here (after the page read closed its connection) and
+                // flushed/closed when the page completes. Keeping the page reader and the
+                // writer disjoint is retained for simplicity, not correctness — under WAL
+                // they could safely overlap.
                 BlockingQueue<WriteItem> writeQ = new ArrayBlockingQueue<>(10_000);
                 final WriteItem poison = new WriteItem(null, null);
                 AtomicBoolean writerDead = new AtomicBoolean(false);
                 Thread drainer = new Thread(() -> {
-                    try (GraphRepository.MiningWriter writer = gr.openMiningWriter(memLimit, dbThreads)) {
+                    try (GraphRepository.MiningWriter writer = gr.openMiningWriter()) {
                         for (;;) {
                             WriteItem it = writeQ.take();
                             if (it == poison) break;
@@ -247,7 +242,7 @@ public class GraphMineCmd implements Runnable {
                         // (visited climbing, mined frozen). Trip the shared stop signal so the
                         // run aborts loudly instead of mining nothing for hours.
                         if (aborted.compareAndSet(false, true)) {
-                            abortReason.set("the DuckDB writer thread failed (" + e.getMessage()
+                            abortReason.set("the mining writer thread failed (" + e.getMessage()
                                     + ") — stopped so we don't keep fetching while persisting nothing.");
                         }
                     } finally {
@@ -349,7 +344,7 @@ public class GraphMineCmd implements Runnable {
         }
         System.out.printf("Graph mine complete: %d POMs mined; %d not-found (marked missing), %d transient (skipped, will retry), %d malformed, %d errors%n",
                 mined.get(), notFound.get(), transientErr.get(), parseFailed.get(), errors.get());
-        System.out.println("Mined into " + new File(cg.cacheGenieRoot(), "graph.db").getAbsolutePath() + " — run 'graph resolve' to build the effective graph.");
+        System.out.println("Mined into " + Sqlite.dbPath(cg.cacheGenieRoot()) + " — run 'graph resolve' to build the effective graph.");
         System.exit(0);
     }
 

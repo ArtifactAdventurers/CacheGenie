@@ -1,6 +1,7 @@
 package dev.gruff.hardstop.cachegenie.cli;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
+import dev.gruff.hardstop.cachegenie.graph.Sqlite;
 import dev.gruff.hardstop.cachegenie.viewer.DependencyViewerServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,10 +14,10 @@ import java.net.URI;
 import java.util.concurrent.CountDownLatch;
 
 /**
- * Launches the browser-based dependency viewer over the local DuckDB graph.
+ * Launches the browser-based dependency viewer over the local SQLite graph.
  *
  * <p>The heavy lifting (HTTP server, query layer, web assets) lives in the
- * {@code viewer} module; this command only resolves the {@code graph.db}
+ * {@code viewer} module; this command only resolves the {@code graph.sqlite}
  * location from the global {@code --cache} option and starts the server on the
  * requested address/port.</p>
  */
@@ -44,7 +45,7 @@ public class ViewCmd implements Runnable {
     @Override
     public void run() {
         CacheGenie cg = parent.genie();
-        File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
+        File dbFile = new File(Sqlite.dbPath(cg.cacheGenieRoot()));
         if (!dbFile.exists()) {
             System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
             System.out.println("Run 'graph mine' + 'graph resolve' first to populate the database.");

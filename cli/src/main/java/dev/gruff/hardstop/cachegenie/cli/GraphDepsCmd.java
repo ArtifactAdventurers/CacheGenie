@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>The worklist (not-missing, not-already-graphed, matching the filters) is built
  * by one SQL query. Descriptor reads (network) run on a worker pool with a per-thread
  * {@link Resolver} (Aether sessions aren't shareable); DB writes are funnelled
- * through one lock (DuckDB single-writer). A version whose descriptor can't be read
+ * through one lock (single writer thread). A version whose descriptor can't be read
  * is marked {@code missing_pom} so re-runs skip it.
  *
  * <p>A single shared {@link RateLimiter} paces the total descriptor-read rate across

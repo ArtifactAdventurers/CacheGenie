@@ -31,7 +31,7 @@ import java.util.Properties;
  * Bulk/incremental discovery via Maven Central's published index (the
  * maven-indexer format) instead of crawling HTML listings. Far fewer requests:
  * a first run downloads the full index; later runs pull only the incremental
- * chunks published since. Records are streamed straight into the DuckDB meta
+ * chunks published since. Records are streamed straight into the SQLite meta
  * tables, so the live HTML crawl ({@code scan}) is only needed for targeted
  * {@code --gav} lookups.
  *
@@ -40,7 +40,7 @@ import java.util.Properties;
  * full re-sync.
  *
  * <p>The incremental path is <b>fully incremental</b>: each chunk is streamed
- * into the DuckDB staging table (constant memory), merged set-based, and the
+ * into the SQLite staging table (constant memory), merged set-based, and the
  * local sync state is advanced past that chunk before the next one starts. A
  * killed or failed run resumes at the first unprocessed chunk instead of
  * starting the whole catch-up over. We therefore manage the state file
@@ -65,16 +65,12 @@ public class IndexerSyncAction {
      * @param limit     stop after this many records (0 = no limit). When &gt; 0, local
      *                  sync state is NOT persisted (so a smoke-test never advances the
      *                  incremental position), and the full path is always used.
-     * @param memLimit   DuckDB memory cap for the staging merge (e.g. "8GB"; null =
-     *                   DuckDB default ~80% RAM). A full-bootstrap merge over tens of
-     *                   millions of staged records needs this to leave the JVM headroom.
-     * @param dbThreads  DuckDB worker-thread cap for the merge (0 = default).
      * @param mergeBatch on the full path, merge into the meta tables every this many
      *                   staged records instead of once at the end (0 = single merge).
-     *                   Bounds peak merge memory by batch size, not pull size — the
-     *                   difference between finishing and an OOM-kill on small-RAM boxes.
+     *                   Bounds the size of each staging table + merge transaction,
+     *                   keeping merges (and any mid-run failure's lost work) small.
      */
-    public void sync(boolean full, long limit, String memLimit, int dbThreads, long mergeBatch) {
+    public void sync(boolean full, long limit, long mergeBatch) {
         URI indexBase = cg.base().resolve(".index/");
         File stateDir = new File(cg.work(), "indexer");
         if (full) {
@@ -104,9 +100,9 @@ public class IndexerSyncAction {
                 System.out.println("Index sync: already up to date (no new chunks).");
             } else if (reader.isIncremental()) {
                 incrementalSync(reader, repo, progress, limit,
-                        stateful ? stateDir : null, loadRemoteProperties(remote), memLimit, dbThreads);
+                        stateful ? stateDir : null, loadRemoteProperties(remote));
             } else {
-                fullSync(reader, repo, progress, limit, memLimit, dbThreads, mergeBatch);
+                fullSync(reader, repo, progress, limit, mergeBatch);
             }
             progress.done();
             completed = true;
@@ -137,22 +133,23 @@ public class IndexerSyncAction {
     }
 
     /**
-     * Full bootstrap: bulk-load ADD records into staging via the Appender and merge
-     * set-based — every {@code mergeBatch} staged records (bounding peak merge memory
-     * by batch size, not pull size), or once at the end when {@code mergeBatch} is 0.
-     * Merging is idempotent and largest-file-wins across batches (the merge upgrades
-     * an existing version row when the staged file is strictly larger), so batching
-     * only changes memory shape, not the result. (A full pull never contains removals.)
+     * Full bootstrap: bulk-load ADD records into the staging table (batched inserts)
+     * and merge set-based — every {@code mergeBatch} staged records (bounding the size
+     * of each staging table and merge transaction), or once at the end when
+     * {@code mergeBatch} is 0. Merging is idempotent and largest-file-wins across
+     * batches (the merge upgrades an existing version row when the staged file is
+     * strictly larger), so batching only changes work-unit size, not the result.
+     * (A full pull never contains removals.)
      */
     private void fullSync(IndexReader reader, MetaRepository repo, Progress progress, long limit,
-                          String memLimit, int dbThreads, long mergeBatch) throws Exception {
+                          long mergeBatch) throws Exception {
         RecordExpander expander = new RecordExpander();
         long records = 0;
         long inBatch = 0;
         int batch = 1;
         long newArtifacts = 0;
         long newVersions = 0;
-        MetaRepository.IndexStageLoader loader = repo.openIndexStage(memLimit, dbThreads);
+        MetaRepository.IndexStageLoader loader = repo.openIndexStage();
         try {
             outer:
             for (ChunkReader chunk : reader) {
@@ -190,7 +187,7 @@ public class IndexerSyncAction {
                             newVersions += m[1];
                             batch++;
                             inBatch = 0;
-                            loader = repo.openIndexStage(memLimit, dbThreads);
+                            loader = repo.openIndexStage();
                         }
                         if (limit > 0 && records >= limit) {
                             System.out.printf("--limit %d reached; stopping the crawl.%n", limit);
@@ -218,7 +215,7 @@ public class IndexerSyncAction {
 
     /**
      * Incremental catch-up, one chunk at a time in constant memory. Each chunk's
-     * ADD records are streamed straight into the DuckDB staging table (the same
+     * ADD records are streamed straight into the SQLite staging table (the same
      * set-based merge as the full bootstrap dedups per version, largest
      * main-artifact file wins), its few REMOVE records are applied afterwards,
      * and the local sync state is advanced past the chunk before the next one
@@ -237,8 +234,7 @@ public class IndexerSyncAction {
      *                 to not persist state (limited smoke-test runs).
      */
     private void incrementalSync(IndexReader reader, MetaRepository repo, Progress progress, long limit,
-                                 File stateDir, Properties remoteProps,
-                                 String memLimit, int dbThreads) throws Exception {
+                                 File stateDir, Properties remoteProps) throws Exception {
         RecordExpander expander = new RecordExpander();
         int totalChunks = reader.getChunkNames().size();
         long seen = 0;
@@ -253,7 +249,7 @@ public class IndexerSyncAction {
                 long chunkAdds = 0;
                 long[] merged = {0, 0};
                 List<String[]> removes = new ArrayList<>();
-                try (MetaRepository.IndexStageLoader loader = repo.openIndexStage(memLimit, dbThreads)) {
+                try (MetaRepository.IndexStageLoader loader = repo.openIndexStage()) {
                     for (Map<String, String> raw : chunk) {
                         Record r = expander.apply(raw);
                         Record.Type type = r.getType();

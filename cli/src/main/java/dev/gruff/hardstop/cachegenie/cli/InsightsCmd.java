@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Ecosystem analysis over the DuckDB database — the "how does software evolve
+ * Ecosystem analysis over the SQLite database — the "how does software evolve
  * and get abandoned" reports, as a sibling to {@code graph stats} (a quick
  * snapshot) and {@code graph query} (ad-hoc SQL). Each subcommand prints one or
  * more titled grids; {@code --format} switches between a padded table (default),
@@ -27,7 +27,9 @@ import java.util.List;
                 InsightsCmd.ArrivalsCmd.class,
                 InsightsCmd.LifecycleCmd.class,
                 InsightsCmd.AbandonmentCmd.class,
+                InsightsCmd.AgeCmd.class,
                 InsightsCmd.ChurnCmd.class,
+                InsightsCmd.ExternalDepsCmd.class,
                 InsightsCmd.ResolutionCmd.class,
                 InsightsCmd.ReportCmd.class,
         })
@@ -114,6 +116,20 @@ public class InsightsCmd implements Runnable {
         }
     }
 
+    @CommandLine.Command(name = "age", aliases = {"freshness"},
+            description = "Age in days of each artifact's latest release, unbucketed: (age_days, artifact_count)")
+    public static class AgeCmd implements Runnable {
+        @CommandLine.ParentCommand
+        InsightsCmd parent;
+        @CommandLine.Mixin
+        ScopeOptions opts;
+
+        @Override
+        public void run() {
+            execute(parent, opts, s -> s.age(opts.scope()));
+        }
+    }
+
     @CommandLine.Command(name = "churn",
             description = "How often consecutive versions of an artifact bump a dependency they already declare")
     public static class ChurnCmd implements Runnable {
@@ -134,6 +150,25 @@ public class InsightsCmd implements Runnable {
         @Override
         public void run() {
             execute(parent, opts, s -> s.churn(opts.scope(), raw, top));
+        }
+    }
+
+    @CommandLine.Command(name = "external-deps", aliases = {"coupling"},
+            description = "Cross-group coupling: how many latest artifacts depend outside their own Maven group, "
+                    + "and the most-referenced external dependencies")
+    public static class ExternalDepsCmd implements Runnable {
+        @CommandLine.ParentCommand
+        InsightsCmd parent;
+        @CommandLine.Mixin
+        ScopeOptions opts;
+
+        @CommandLine.Option(names = "--top", paramLabel = "N", defaultValue = "30",
+                description = "Number of most-referenced external dependencies to list")
+        int top;
+
+        @Override
+        public void run() {
+            execute(parent, opts, s -> s.externalDeps(opts.scope(), top));
         }
     }
 
@@ -193,9 +228,9 @@ public class InsightsCmd implements Runnable {
             emit(query.run(stats), opts.format);
         } catch (SQLException e) {
             String msg = e.getMessage();
-            if (msg != null && (msg.contains("Conflicting lock") || msg.contains("Could not set lock"))) {
-                System.err.println("graph.db is locked by another CacheGenie process (most likely a running 'graph deps'/'mine').");
-                System.err.println("DuckDB cannot attach (even read-only) while another process holds it read-write; wait for that run to finish.");
+            if (msg != null && (msg.contains("SQLITE_BUSY") || msg.contains("database is locked"))) {
+                System.err.println("The graph database is busy (a writer held it past the 30s busy timeout — most likely a large merge).");
+                System.err.println("Reads normally run alongside writers under WAL; retry, or wait for the writing run to finish.");
             } else {
                 System.err.println("SQL Error: " + msg);
             }

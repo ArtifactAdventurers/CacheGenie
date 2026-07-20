@@ -17,7 +17,7 @@ import java.io.File;
  *
  * <p>Input is the CSV exported from the Goblin Neo4j dump (see {@code GOBLIN-IMPORT.md}),
  * header {@code source,targetArtifact,targetVersion,scope}. The load is set-based in
- * DuckDB and idempotent.
+ * SQLite and idempotent.
  */
 @CommandLine.Command(name = "import-goblin",
         description = "Seed artifacts/dependencies from a Goblin export CSV (resolved edges; bulk-load, no Central traffic). See GOBLIN-IMPORT.md.")

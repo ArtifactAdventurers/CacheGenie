@@ -7,8 +7,8 @@ Guidance for Claude Code (and other AI agents) working in this repository.
 CacheGenie is a command-line tool for managing and analyzing Maven artifact
 caches. It discovers artifact versions in remote repositories, fetches their
 POM "recipes", analyzes/visualizes dependency graphs, and hydrates the local
-Maven cache with JARs. Dependency graphs are persisted to a local DuckDB
-database for SQL analysis.
+Maven cache with JARs. Dependency graphs are persisted to a local SQLite
+database for SQL analysis (migrated from DuckDB — see `MIGRATION-SQLITE.md`).
 
 The user-facing workflow (the "Genie" workflow):
 `scan/index` → `fetch/meta` → `map/graph` → `hydrate/cache`.
@@ -52,9 +52,11 @@ The reactor root (`pom.xml`, groupId `dev.gruff.hardstop`, artifactId
   - `cachegenie.entities` — Maven coordinate model: `ArtifactRef`, `GroupId`,
     `ArtifactId`, `Version`, `POM`, `POMStatus`.
   - `cachegenie.graph` — `GraphBuilder`, `GraphNode`, `GraphRepository`
-    (DuckDB persistence), `MetaRepository` (discovery catalogue), `PomResolver`
-    (deferred resolution), and `EcosystemStats` (read-only evolution analytics
-    backing the `insights` command).
+    (SQLite persistence), `MetaRepository` (discovery catalogue), `PomResolver`
+    (deferred resolution), `EcosystemStats` (read-only evolution analytics
+    backing the `insights` command), and `Sqlite` — the **single** connection
+    factory (WAL, `busy_timeout`, read-only opens). All DB access in any module
+    must go through it; never `DriverManager` directly.
   - `cachegenie.parsers` — `POMFileParser`, `ParserHelper`.
   - `cachegenie.utils` — `FileChecks`, `ObjectChecks`, `StringChecks`.
   - `resolver` — wrappers around Maven Resolver (Aether): `Resolver`,
@@ -63,7 +65,7 @@ The reactor root (`pom.xml`, groupId `dev.gruff.hardstop`, artifactId
   (`dev.gruff.hardstop.cachegenie.viewer`). A self-contained `HttpServer`
   (`com.sun.net.httpserver`, module `jdk.httpserver` — **no** web framework
   dependency) that serves a single-page UI from the classpath (`/webui`) plus
-  read-only `/api` JSON endpoints. `GraphQueryService` is the read-only DuckDB
+  read-only `/api` JSON endpoints. `GraphQueryService` is the read-only SQLite
   query layer (forward/reverse/transitive deps + neighbourhood graph, all
   scope-filterable); `DependencyViewerServer` is the HTTP layer; `Json` is a
   tiny hand-rolled writer so the module needs no JSON library. Depends only on
@@ -108,7 +110,7 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   chunks. `--full` ignores local state and re-pulls everything. Local sync state
   lives in `~/.m2/cachegenie/work/indexer`. Uses `org.apache.maven.indexer:indexer-reader`.
   `IndexerSyncAction` branches on `reader.isIncremental()`: a **full** pull bulk-loads
-  every ADD record into a staging table via DuckDB's Appender then merges set-based
+  every ADD record into a staging table via batched inserts then merges set-based
   (`MetaRepository.IndexStageLoader` — collapses ~100M file-records to distinct
   versions once, builds the index once; the earlier per-row path took ~24h);
   **incremental** pulls are processed **one chunk at a time in constant memory**:
@@ -125,22 +127,21 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   remote/local `ResourceHandler`s; `HttpResourceHandler` streams are self-healing —
   a mid-stream reset reconnects with `Range: bytes=<offset>-` (`If-Range`-pinned to
   the original ETag, bounded consecutive retries + backoff) so the hour-long full
-  pull survives CDN connection resets instead of restarting from byte 0. The staging merge applies DuckDB memory guards
-  (spill `temp_directory` next to graph.db, `preserve_insertion_order=false`;
-  `MetaRepository.applyMemoryGuards`) — without them the full merge OOM-killed at
-  ~20M staged records. `--mem-limit <size>` (recommended for a full bootstrap; set
-  below RAM minus JVM heap) and `--db-threads <n>` cap DuckDB further. Full pulls
+  pull survives CDN connection resets instead of restarting from byte 0. (The DuckDB-era memory
+  guards and `--mem-limit`/`--db-threads` options are gone — SQLite's page cache
+  is a cap, not a target.) Full pulls
   merge every `--merge-batch <n>` staged records (default 5M; `0` = one merge at
-  the end) so peak merge memory is bounded by batch size, not pull size — safe
+  the end) so staging/transaction size is bounded by batch size, not pull size — safe
   because the staging merge upserts largest-file-wins (`ON CONFLICT DO UPDATE ...
   WHERE` strictly-larger file) and is idempotent across batches. The full
-  load grows `graph.db` with the staging table (run `db compact --rewrite` after). `--limit <n>` stops after N records and
+  load grows `graph.sqlite` with the staging table (run `db compact --rewrite` after). `--limit <n>` stops after N records and
   does NOT persist sync state (smoke-test the full path quickly; pair with
   `-c <scratch>`). Far fewer requests than `scan`; `scan` remains for targeted
   `--gav` lookups and immediacy.
 - `meta` (`fetch`) — download missing POMs for indexed versions.
 - `graph` (`map`) — subcommands: `deps`, `mine`, `resolve`,
-  `import-goblin`, `export-neo4j`, `push-neo4j`, `query` (SQL against the DuckDB graph), `stats`. (The legacy Aether `artifact`/`cache` subcommands were removed — use `mine`+`resolve`.) `deps` (`GraphDepsCmd`) builds the
+  `import-goblin`, `export-neo4j`, `push-neo4j`, `query` (SQL against the DuckDB graph; `-f/--file <path>`
+  reads the SQL from a file instead of the inline argument, for long/multi-line ad-hoc queries), `stats`. (The legacy Aether `artifact`/`cache` subcommands were removed — use `mine`+`resolve`.) `deps` (`GraphDepsCmd`) builds the
   **direct**-edge graph for a worklist selected from the meta catalogue by
   `--gav` selectors and/or `--since <dur>` (versions published within a window,
   e.g. `30d`/`12w`); `MetaRepository.selectVersionsToGraph` does the selection in
@@ -159,7 +160,7 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   poisoning data. Descriptor
   reads run on a worker pool (`--threads`, default 8) with a per-thread `Resolver`
   (Aether sessions aren't shareable); all DB writes are funnelled through one lock
-  (DuckDB single-writer). `deps` also takes `--rate <req/min>` (shared
+  (single writer thread). `deps` also takes `--rate <req/min>` (shared
   `RateLimiter`, one permit per artifact; `0`=unlimited) to proactively throttle
   descriptor reads across workers.
   `mine` (`GraphMineCmd`) is the polite alternative to `deps`: it fetches **only the
@@ -176,14 +177,11 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   — `PAGE_SIZE=50_000`) so it runs in constant memory even on a full-Central backlog
   (~14.8M versions) instead of materialising the whole list + every `Future` (the old path
   OOM'd at task submission). One reused worker pool; per page a fresh drainer/`MiningWriter`
-  is opened *after* the page read closes its connection, so a reader and the writer are never
-  open against `graph.db` at once. `--limit` is a total budget across pages/selectors (still
+  is opened *after* the page read closes its connection — kept for simplicity, though under
+  SQLite WAL reader/writer overlap would be fine (this stopped being a correctness rule with
+  the DuckDB migration). `--limit` is a total budget across pages/selectors (still
   useful for polite, resumable drips, not just to bound memory).
-  Same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`; plus
-  `--mem-limit <size>`/`--db-threads <n>` DuckDB caps for the mining writer (its
-  flush merges join the large `pom_*` tables — cap it on small-RAM machines, the
-  unguarded default of ~80% RAM on top of the JVM segfaulted DuckDB natively on
-  an 8GB box). Parents
+  Same `--gav`/`--since`/`--threads`/`--rate`/`--list`/429-abort as `deps`. Parents
   and BOMs are mined once as their own nodes, never re-downloaded per child.
   `PomFetcher`'s shared `HttpClient` uses **HTTP/1.1 deliberately** (not HTTP/2): the
   JDK client multiplexes all HTTP/2 requests onto one connection per origin and throws
@@ -202,34 +200,20 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   constant memory on a full-Central backlog (the old path materialised the whole `todo`
   list *and* cached every node — double OOM). The per-node work is DB-**read**-bound
   (loading parent/BOM/property rows), so it's parallelised: `--threads` (default 8)
-  reader workers each own a `DuckDBConnection.duplicate()` connection (concurrent
-  readers over one in-process DB via MVCC) and only **read**, producing resolved child
+  reader workers each own their own read-only SQLite connection (WAL allows them to
+  run concurrently with the writer) and only **read**, producing resolved child
   ids / pending inserts; **all writes** (edge inserts, synthetic-artifact inserts,
   `deps_resolved` updates) funnel through a single writer connection on the collector
-  thread, so DuckDB's single-writer rule still holds. This is the **only** place in the
-  codebase that opens concurrent DuckDB connections (`duplicate()`); `mine` instead
-  serialises because its workers do network I/O, not DB I/O. No network → no `--rate`.
-  Per-reader parent/id caches and the writer's id cache are bounded LRUs. **Before** the
-  per-node pass, a set-based fast path (`resolveSetBased`) resolves the context-free
-  majority in a few hash-join statements — (A) literal versions, (B) exact `${name}`
-  tokens defined concretely in the *same* POM's properties, (C) null versions pinned by
-  a concrete non-import managed entry in the *same* POM — synthesising missing targets,
-  inserting edges, and marking a POM resolved iff *every* dep is covered by A/B/C (the
-  marking predicate is the exact complement of the passes). This matters because DuckDB
-  table-scans `WHERE artifact_id = ?`/`(gid,aid)` filters (it won't use a secondary ART
-  index for them — so per-`artifact_id` indexes were tried and reverted as useless), so
-  the per-node path is scan-bound. A second set-based pass (`resolveInheritedSetBased`)
-  then resolves the **parent-chain** residue (~95% of unresolved POMs have a parent): a
-  recursive CTE over parent links builds per-node effective properties (nearest wins +
-  `${other}` interpolation) and effective non-import managed versions (interpolated via
-  those props), resolves each dep (literal / `${name}` / null-managed), and marks a POM
-  resolved iff every dep is concrete. It also resolves **import BOMs transitively** (the
-  import graph is followed to a fixpoint up to `BOM_DEPTH` levels, so BOM-of-BOM resolves;
-  each reached BOM's effective managed versions — BOM + its parent chain — are computed once
-  and attributed to consumers by join; parent-chain managed wins over BOM). Runs in bounded
-  keyset batches (`INHERITED_BATCH`) so the per-node effective-property explosion doesn't OOM.
-  Only embedded/partial `${...}`, profiles, ranges, and exclusions fall through to the
-  per-node pass; `--set-based-only` skips that pass.
+  thread. No network → no `--rate`.
+  Per-reader parent/id caches and the writer's id cache are bounded LRUs. Per node it
+  builds effective properties from the parent chain (nearest wins), collects managed
+  versions from own + inherited `dependencyManagement` and **import BOMs transitively**
+  (each BOM's entries interpolated in the *BOM's own* effective-property context, so
+  `spring-boot-dependencies`-style `${...}` entries and BOM-of-BOM resolve), and
+  interpolates `${...}` in Java. Point lookups are index-served under SQLite — the
+  DuckDB-era set-based passes (`resolveSetBased`/`resolveInheritedSetBased` and the
+  `--set-based-only`/`--inherited-batch` options) existed only because DuckDB
+  table-scanned those lookups, and were deleted with the migration.
   `import-goblin` (`GraphImportCmd` → `GraphRepository.importGoblinEdges`) seeds
   `artifacts`/`dependencies` from a Goblin CSV export (Aether-resolved edges,
   equivalent to `graph deps`, for all of Central up to the dataset snapshot) via a
@@ -249,15 +233,20 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
   GPL applies to the Neo4j server, not the Bolt driver, so bundling it is fine.
 - `cache` (`hydrate`, `fill`) — download JARs into the local repository.
 - `compare` — API comparison between artifact versions.
-- `db` — manage the DuckDB graph database. Subcommands: `compact` (CHECKPOINT +
-  VACUUM to reclaim space), `optimize` (secondary indexes on `artifacts(gid,aid)`,
-  `dependencies(child_id)`, `meta_artifacts(gid,aid)`, `meta_versions(ga_id)` +
-  the POM-mining coord indexes + `ANALYZE`), `views`
+- `db` — manage the SQLite graph database. Subcommands: `compact`
+  (`wal_checkpoint(TRUNCATE)` + `VACUUM`; `--rewrite` = `VACUUM INTO` a fresh file,
+  `.bak` kept), `optimize` (secondary indexes on the hot columns + `ANALYZE` —
+  under SQLite these genuinely serve the point lookups), `views`
   (create the `gav`, `dependents`, `version_ranges`, `released` convenience
-  views; `released` normalises `meta_versions.published` to a real `TIMESTAMP`), and
-  `export` (`COPY` tables + `version_ranges` to parquet/csv/json via
-  `-f/--format`, `-o/--out`). Implemented in `actions/DBAction.java`. (Replaced
-  the old `.properties`→CSV dumper.)
+  views; `released` normalises `meta_versions.published` via `julianday`/text
+  normalisation), `export` (app-side CSV/JSON via `-f/--format`, `-o/--out`;
+  parquet removed — use the standalone duckdb CLI ad hoc), and
+  **`migrate-sqlite`** (one-off copy of a legacy DuckDB `graph.db` into
+  `graph.sqlite`: ids preserved, row counts verified, source opened read-only and
+  kept as fallback; `--force` replaces an existing target). Implemented in
+  `actions/DBAction.java` + `actions/MigrateSqliteAction.java` (the migrator is
+  the only remaining DuckDB-touching code and goes away, with the `duckdb_jdbc`
+  dependency, once migration is verified).
 - `metadata` (`gen-metadata`) — synthesise `maven-metadata.xml` files into the local
   Maven repo (`~/.m2/repository`) from the discovery catalogue
   (`meta_artifacts`/`meta_versions`), **no network**. `mine` fetches only `.pom`, so
@@ -275,22 +264,33 @@ Commands live in `cli/.../cli/`, dispatched from `RootCmd`. Aliases in parens.
 - `analyse` — inspect the cache; subcommand `pom` (analyse local POMs in
   `~/.m2/repository`). (The `meta` subcommand was removed — use `graph stats` for
   discovery-metadata counts; `meta-csv` was removed too — use `db export`.)
-- `insights` (`insight`) — ecosystem-evolution analysis over `graph.db`, the
+- `insights` (`insight`) — ecosystem-evolution analysis over the graph DB, the
   richer companion to the `graph stats` snapshot. Subcommands: `arrivals`
   (coverage + versions/artifacts/groups per year), `lifecycle` (versions-per-artifact
   stats, release-count + lifespan distributions, single-release share, update
-  frequency), `abandonment` (quiet-2y/5y + last-release-age survival curve), `churn`
+  frequency), `abandonment` (quiet-2y/5y + last-release-age survival curve), `age`
+  (`freshness`) (unbucketed `age_days -> artifact_count` over each artifact's
+  latest/most-recently-published release — the raw distribution behind
+  `abandonment`'s named buckets), `churn`
   (how often consecutive versions of an artifact bump a dependency they already
   declare — new/removed deps excluded; resolved `dependencies` by default, `--raw`
-  uses declared `direct_dep` literals, `--top N`), `resolution` (`coverage`) (the
+  uses declared `direct_dep` literals, `--top N`), `external-deps` (`coupling`)
+  (cross-group coupling on each artifact's latest *graphed* version — newest by
+  publish date among versions with edges in `dependencies`; "external" = literal
+  `child.gid <> parent.gid`, so a hierarchical split of the same publisher still
+  counts as external; reports total-latest vs. graphed coverage plus the
+  most-referenced external dependencies, `--top N`), `resolution` (`coverage`) (the
   catalogued→mined→resolved funnel via `pom_meta.deps_resolved`, un-mined backlog,
   and resolve-ran-but-no-edges POMs — "does everything have resolved deps?"), and
-  `report` (all, churn summary only). Shared opts `-g/--gav <group[:artifact]>` (subgroup-matching),
+  `report` (all, churn summary only — `age` is not included, since its
+  unbucketed rows would flood a combined report). Shared opts `-g/--gav <group[:artifact]>` (subgroup-matching),
   `--since`/`--until <year>`, `-f/--format table|csv|json`. `InsightsCmd` (CLI,
   table/csv/json formatting) → `EcosystemStats` (core, read-only; SQL lives here so
-  it's unit-tested against a synthetic DuckDB). Time-based metrics parse the
-  ISO-8601 `published` string via `TRY_CAST(replace(...,'Z',''))`; `churn` is a
-  window pass over the dependency tables — scope it and run `db optimize` at scale.
+  it's unit-tested against a synthetic SQLite DB). Time-based metrics parse the
+  ISO-8601 `published` string via `julianday`/`strftime` (parse-failure-gated);
+  `median`/`quantile_cont` are computed in Java with `quantile_cont` interpolation
+  semantics; `churn` is a window pass over the dependency tables — scope it and run
+  `db optimize` at scale.
 - `view` (`web`, `ui`) — launch the browser-based dependency viewer over the
   DuckDB graph. `-a/--address/--host` (default `127.0.0.1`), `-p/--port`
   (default `8080`, `0` = free port), `--no-open` to skip auto-launching a
@@ -309,8 +309,10 @@ Resolved by the `CacheGenie` facade in `core` (relative to `--cache`, default
 - `~/.m2/cachegenie/` — CacheGenie's own root.
   - `~/.m2/cachegenie/work` — index/discovery working state.
   - `~/.m2/cachegenie/meta` — discovery metadata and analysis results.
-  - `~/.m2/cachegenie/graph.db` — DuckDB dependency graph (schema in
-    `DB_SCHEMA.md`: `artifacts` and `dependencies` tables).
+  - `~/.m2/cachegenie/graph.sqlite` — SQLite dependency graph + discovery
+    catalogue (schema in `DB_SCHEMA.md`; table shapes unchanged from the DuckDB
+    era). A legacy DuckDB `graph.db` may sit alongside until `db migrate-sqlite`
+    has been run and verified — the current code never reads it.
 
 ## Tests
 
@@ -352,7 +354,11 @@ Run with `mvn test`.
 ## Reference docs
 
 - `README.md` — user-facing usage and full command/option reference.
-- `DB_SCHEMA.md` — DuckDB graph schema (incl. POM-mining tables) and example analysis queries.
+- `DB_SCHEMA.md` — graph schema (incl. POM-mining tables) and example analysis
+  queries. (Written in the DuckDB era; table shapes are unchanged under SQLite but
+  some example queries use DuckDB functions — pending refresh.)
+- `MIGRATION-SQLITE.md` — the DuckDB→SQLite migration: rationale, architecture
+  options, conventions (rowid ids, WAL, the `Sqlite` helper), phasing.
 - `CHANGELOG.md` — Keep a Changelog format, SemVer.
 - `MINING.md` — running `graph mine` at scale politely: the Google GCS mirror (`-r`), rate guidance, resumable/chunked (`--limit`) runs.
 - `GOBLIN-IMPORT.md` — seed the graph from the Goblin dataset (Neo4j 4.x dump → CSV → `import-goblin`); incl. the 4.x-vs-CalVer version caveat.

@@ -1,6 +1,7 @@
 package dev.gruff.hardstop.cachegenie.cli;
 
 import dev.gruff.hardstop.cachegenie.CacheGenie;
+import dev.gruff.hardstop.cachegenie.graph.Sqlite;
 import org.neo4j.driver.AuthToken;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
@@ -13,7 +14,6 @@ import picocli.CommandLine;
 
 import java.io.File;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Duration;
@@ -22,25 +22,24 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 
 /**
- * Push CacheGenie's DuckDB graph delta into an <em>existing</em> Neo4j graph (e.g. a
- * loaded Goblin dump) over Bolt, augmenting it in place. DuckDB stays the system of
+ * Push CacheGenie's SQLite graph delta into an <em>existing</em> Neo4j graph (e.g. a
+ * loaded Goblin dump) over Bolt, augmenting it in place. SQLite stays the system of
  * record; Neo4j is the canonical graph that this command tops up with whatever
  * CacheGenie has freshly mined/resolved.
  *
  * <p>Writes in Goblin's schema and uses {@code MERGE} throughout, so it is idempotent
  * (re-running never duplicates) and additive (it never touches or rebuilds the
- * existing graph). Since CacheGenie's DuckDB holds only the newly-resolved data (the
- * Goblin baseline lives in Neo4j, not DuckDB), pushing "everything" is the delta;
+ * existing graph). Since CacheGenie's database holds only the newly-resolved data (the
+ * Goblin baseline lives in Neo4j, not locally), pushing "everything" is the delta;
  * {@code --since} narrows it further by publish date.
  *
  * <p>Uses the Apache-2.0 Neo4j Bolt driver — no GPL entanglement (that applies to the
  * Neo4j <em>server</em>, which CacheGenie does not bundle).
  */
 @CommandLine.Command(name = "push-neo4j",
-        description = "MERGE CacheGenie's DuckDB graph delta into an existing Neo4j graph over Bolt (idempotent, additive). See HYBRID-NEO4J.md.")
+        description = "MERGE CacheGenie's graph delta into an existing Neo4j graph over Bolt (idempotent, additive). See HYBRID-NEO4J.md.")
 public class GraphPushNeo4jCmd implements Runnable {
     private static final Logger log = LoggerFactory.getLogger(GraphPushNeo4jCmd.class);
 
@@ -73,7 +72,7 @@ public class GraphPushNeo4jCmd implements Runnable {
     String password;
 
     @CommandLine.Option(names = {"--since"}, paramLabel = "<dur>",
-            description = "Only push releases published within this window (e.g. 30d, 12w). Requires index-sync publish dates. Omit to push all of DuckDB's graph.")
+            description = "Only push releases published within this window (e.g. 30d, 12w). Requires index-sync publish dates. Omit to push the whole local graph.")
     String since;
 
     @CommandLine.Option(names = {"--batch-size"}, paramLabel = "<n>",
@@ -83,10 +82,11 @@ public class GraphPushNeo4jCmd implements Runnable {
     @Override
     public void run() {
         CacheGenie cg = parent.parent.genie();
-        File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
+        String dbPath = Sqlite.dbPath(cg.cacheGenieRoot());
+        File dbFile = new File(dbPath);
         if (!dbFile.exists()) {
             System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
-            System.out.println("Populate DuckDB first (index-sync + graph mine + graph resolve).");
+            System.out.println("Populate the graph first (index-sync + graph mine + graph resolve).");
             System.exit(1);
         }
         Instant cutoff = (since != null) ? Instant.now().minus(parseDuration(since)) : null;
@@ -114,11 +114,8 @@ public class GraphPushNeo4jCmd implements Runnable {
         String pw = (password != null) ? password : System.getenv("NEO4J_PASSWORD");
         AuthToken auth = (pw == null || pw.isEmpty()) ? AuthTokens.none() : AuthTokens.basic(user, pw);
 
-        Properties props = new Properties();
-        props.setProperty("duckdb.read_only", "true");
-
         long nodes = 0, edges = 0;
-        try (Connection duck = DriverManager.getConnection("jdbc:duckdb:" + dbFile.getAbsolutePath(), props);
+        try (Connection db = Sqlite.openReadOnly(dbPath);
              Driver driver = GraphDatabase.driver(uri, auth)) {
             driver.verifyConnectivity();
 
@@ -130,7 +127,7 @@ public class GraphPushNeo4jCmd implements Runnable {
 
             System.out.println("Pushing release nodes" + (cutoff != null ? " (published since " + cutoff + ")" : "") + " ...");
             try (Session s = driver.session();
-                 PreparedStatement ps = duck.prepareStatement(nodeSql)) {
+                 PreparedStatement ps = db.prepareStatement(nodeSql)) {
                 if (cutoff != null) ps.setString(1, cutoff.toString());
                 try (ResultSet rs = ps.executeQuery()) {
                     List<Map<String, Object>> batch = new ArrayList<>();
@@ -151,7 +148,7 @@ public class GraphPushNeo4jCmd implements Runnable {
 
             System.out.println("Pushing dependency edges ...");
             try (Session s = driver.session();
-                 PreparedStatement ps = duck.prepareStatement(edgeSql)) {
+                 PreparedStatement ps = db.prepareStatement(edgeSql)) {
                 if (cutoff != null) ps.setString(1, cutoff.toString());
                 try (ResultSet rs = ps.executeQuery()) {
                     List<Map<String, Object>> batch = new ArrayList<>();

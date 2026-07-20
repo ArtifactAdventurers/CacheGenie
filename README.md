@@ -124,7 +124,7 @@ Builds, resolves, and queries the dependency graph. Subcommands:
 -   **`graph mine`**: Fetch each catalogue version's POM (one GET, no fan-out) and store its raw facts + direct dependencies.
 -   **`graph resolve`**: Project mined POMs into concrete dependency edges (parent/BOM/property resolution). Resolves almost everything **set-based**: first the context-free majority (literal versions, same-POM `${property}`/managed), then the inherited residue via recursive CTEs — parent-chain effective properties + managed versions, and import BOMs resolved transitively (BOM-of-BOM, each distinct BOM's managed versions computed once and attributed to consumers). Only embedded `${...}`, profiles, version ranges, and exclusions fall through to the parallel per-node pass (`--threads <n>`, default 8). `--set-based-only` skips the per-node pass. No network, so no `--rate`. Run after `graph mine`; idempotent and resumable.
 -   **`graph deps`**: Build the direct-dependency graph for targeted/recent versions via an Aether descriptor read.
--   **`graph query`**: Run SQL (including recursive CTEs for transitive deps) against the DuckDB graph.
+-   **`graph query`**: Run SQL (including recursive CTEs for transitive deps) against the DuckDB graph. Pass the SQL inline as an argument, or point `-f/--file <path>` at a `.sql` file for long/multi-line ad-hoc queries.
 -   **`graph stats`**: Print graph and discovery-metadata statistics.
 -   **`graph import-goblin` / `graph export-neo4j` / `graph push-neo4j`**: Seed from a Goblin CSV, or sync to a Neo4j read-side (see `GOBLIN-IMPORT.md`, `HYBRID-NEO4J.md`).
 

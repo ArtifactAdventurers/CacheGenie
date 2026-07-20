@@ -298,6 +298,12 @@ You can query the database directly using the `graph query` command:
 cachegenie graph query "SELECT * FROM artifacts LIMIT 10"
 ```
 
+For longer or multi-line SQL, put it in a file and pass `-f/--file` instead of the inline argument:
+
+```bash
+cachegenie graph query -f oldest-latest-versions.sql
+```
+
 ## Example Analysis Queries
 
 ### Top 10 Most Depended-Upon Artifacts (In-Degree)

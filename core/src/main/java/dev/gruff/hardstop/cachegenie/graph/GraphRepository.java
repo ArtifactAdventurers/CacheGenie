@@ -5,9 +5,17 @@ import dev.gruff.hardstop.resolver.Resolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.sql.*;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -19,45 +27,19 @@ public class GraphRepository {
     private final String dbPath;
 
     public GraphRepository(File cacheGenieRoot) {
-        this.dbPath = new File(cacheGenieRoot, "graph.db").getAbsolutePath();
+        this.dbPath = Sqlite.dbPath(cacheGenieRoot);
         initSchema();
     }
 
     private Connection getConnection() throws SQLException {
-        return DriverManager.getConnection("jdbc:duckdb:" + dbPath);
-    }
-
-    /**
-     * Point DuckDB at an explicit spill directory (next to the database), stream large
-     * {@code INSERT ... SELECT} results instead of buffering them to preserve row order,
-     * and optionally cap DuckDB's memory/threads — so set-based work spills to disk
-     * rather than exhausting RAM alongside the JVM. Mirrors
-     * {@code MetaRepository.applyMemoryGuards} / {@code PomResolver.applyMemoryGuards};
-     * settings are DB-wide while the database is open in this process. Best-effort:
-     * failures are logged and work proceeds on defaults.
-     */
-    private void applyMemoryGuards(Connection conn, String memLimit, int dbThreads) {
-        String tempDir = (dbPath + ".tmp").replace("'", "''");
-        try (Statement st = conn.createStatement()) {
-            st.execute("SET temp_directory = '" + tempDir + "'");
-            try { st.execute("SET preserve_insertion_order = false"); } catch (SQLException ignore) { /* older DuckDB */ }
-            if (dbThreads > 0) {
-                st.execute("SET threads = " + dbThreads);
-            }
-            if (memLimit != null && !memLimit.isBlank()) {
-                st.execute("SET memory_limit = '" + memLimit.trim().replace("'", "''") + "'");
-            }
-            log.info("Mining DB guards: memory_limit={}, threads={}, preserve_insertion_order=false, temp_directory={}.tmp",
-                    (memLimit != null && !memLimit.isBlank()) ? memLimit.trim() : "<default ~80% RAM>",
-                    dbThreads > 0 ? dbThreads : "<default: one per core>", dbPath);
-        } catch (SQLException e) {
-            log.warn("Could not apply DuckDB memory guards (continuing on defaults): {}", e.getMessage());
-        }
+        return Sqlite.open(dbPath);
     }
 
     private void initSchema() {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement()) {
+            // id INTEGER PRIMARY KEY is a rowid alias: omit it on INSERT and SQLite
+            // assigns the next id (no sequence needed).
             stmt.execute("CREATE TABLE IF NOT EXISTS artifacts (" +
                     "id INTEGER PRIMARY KEY," +
                     "gid VARCHAR," +
@@ -65,9 +47,7 @@ public class GraphRepository {
                     "version VARCHAR," +
                     "classifier VARCHAR," +
                     "UNIQUE (gid, aid, version, classifier))");
-            
-            stmt.execute("CREATE SEQUENCE IF NOT EXISTS seq_artifact_id");
-            
+
             stmt.execute("CREATE TABLE IF NOT EXISTS dependencies (" +
                     "parent_id INTEGER," +
                     "child_id INTEGER," +
@@ -76,9 +56,19 @@ public class GraphRepository {
 
             initMiningSchema(stmt);
 
-            log.info("DuckDB schema initialized at {}", dbPath);
+            // Day-one secondary indexes (see MIGRATION-SQLITE.md §4): under SQLite these
+            // serve the point lookups that DuckDB table-scanned. pom_meta(artifact_id)
+            // is already the PRIMARY KEY, so it needs no extra index.
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_dependencies_child ON dependencies(child_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_dependencies_parent ON dependencies(parent_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_pom_meta_parent ON pom_meta(parent_gid, parent_aid, parent_version)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_direct_dep_artifact ON direct_dep(artifact_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_dependency_management_artifact ON dependency_management(artifact_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_pom_properties_artifact ON pom_properties(artifact_id)");
+
+            log.info("SQLite schema initialized at {}", dbPath);
         } catch (SQLException e) {
-            log.error("Failed to initialize DuckDB schema", e);
+            log.error("Failed to initialize SQLite schema", e);
         }
     }
 
@@ -215,17 +205,20 @@ public class GraphRepository {
             }
         }
 
-        // Not found, insert
+        // Not found, insert (id omitted — rowid alias) and read back last_insert_rowid()
+        // on the same connection.
         try (PreparedStatement pstmt = conn.prepareStatement(
-                "INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES (nextval('seq_artifact_id'), ?, ?, ?, ?) RETURNING id")) {
+                "INSERT INTO artifacts (gid, aid, version, classifier) VALUES (?, ?, ?, ?)")) {
             pstmt.setString(1, gid);
             pstmt.setString(2, aid);
             pstmt.setString(3, version);
             pstmt.setString(4, classifier);
-            try (ResultSet rs = pstmt.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getInt(1);
-                }
+            pstmt.executeUpdate();
+        }
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT last_insert_rowid()")) {
+            if (rs.next()) {
+                return rs.getInt(1);
             }
         }
         throw new SQLException("Failed to insert artifact and retrieve ID");
@@ -259,7 +252,7 @@ public class GraphRepository {
     /**
      * Open a writer that reuses ONE connection for many direct-edge writes. The
      * per-call {@link #persistDirect} opens/commits/closes a fresh connection each
-     * time, which — serialised behind a single-writer lock — caps throughput at a
+     * time, which — serialised behind a single writer — caps throughput at a
      * few per second on a large DB. This writer holds the connection open, caches
      * artifact ids, reuses prepared statements, and commits in batches. Drive it
      * from a single thread (e.g. all calls under one lock); use try-with-resources.
@@ -274,6 +267,7 @@ public class GraphRepository {
         private final Connection conn;
         private final PreparedStatement selArt;
         private final PreparedStatement insArt;
+        private final PreparedStatement lastId;
         private final PreparedStatement insEdge;
         private final PreparedStatement markMissing;
         private final Map<String, Integer> idCache = new HashMap<>();
@@ -285,7 +279,8 @@ public class GraphRepository {
             selArt = conn.prepareStatement(
                     "SELECT id FROM artifacts WHERE gid = ? AND aid = ? AND version = ? AND classifier = ''");
             insArt = conn.prepareStatement(
-                    "INSERT INTO artifacts (id, gid, aid, version, classifier) VALUES (nextval('seq_artifact_id'), ?, ?, ?, '') RETURNING id");
+                    "INSERT INTO artifacts (gid, aid, version, classifier) VALUES (?, ?, ?, '')");
+            lastId = conn.prepareStatement("SELECT last_insert_rowid()");
             insEdge = conn.prepareStatement(
                     "INSERT OR IGNORE INTO dependencies (parent_id, child_id, scope) VALUES (?, ?, ?)");
             markMissing = conn.prepareStatement(
@@ -307,7 +302,8 @@ public class GraphRepository {
                 insArt.setString(1, gid);
                 insArt.setString(2, aid);
                 insArt.setString(3, version);
-                try (ResultSet rs = insArt.executeQuery()) {
+                insArt.executeUpdate();
+                try (ResultSet rs = lastId.executeQuery()) {
                     if (rs.next()) id = rs.getInt(1);
                 }
             }
@@ -366,7 +362,7 @@ public class GraphRepository {
         @Override
         public void close() {
             try { conn.commit(); } catch (SQLException e) { log.error("final graph-deps commit failed", e); }
-            for (PreparedStatement ps : new PreparedStatement[]{selArt, insArt, insEdge, markMissing}) {
+            for (PreparedStatement ps : new PreparedStatement[]{selArt, insArt, lastId, insEdge, markMissing}) {
                 try { if (ps != null) ps.close(); } catch (SQLException ignore) { /* ignore */ }
             }
             try { conn.close(); } catch (SQLException e) { log.error("closing graph-deps connection failed", e); }
@@ -378,62 +374,53 @@ public class GraphRepository {
      * → rows across {@code pom_meta}, {@code direct_dep}, {@code dependency_management},
      * {@code pom_properties}, {@code pom_developers}, {@code pom_licenses}).
      *
-     * <p>Rows are staged via DuckDB's {@code Appender} into constraint-free,
+     * <p>Rows are staged via batched {@code PreparedStatement}s into constraint-free,
      * coordinate-keyed staging tables and merged set-based every {@link
      * MiningWriter#FLUSH_EVERY} POMs (artifact ids are assigned once per chunk by a
      * single bulk {@code INSERT … SELECT}, then the {@code pom_*} rows are inserted by
      * joining staging to {@code artifacts} on coordinates). This replaces the old
-     * ~14-statements-per-POM path, whose per-row {@code INSERT}/{@code DELETE} cost on
-     * an OLAP engine — serialized behind a single writer — capped throughput at a few
-     * tens/s regardless of fetch concurrency.
+     * ~14-statements-per-POM path, whose per-row {@code INSERT}/{@code DELETE} cost —
+     * serialized behind a single writer — capped throughput at a few tens/s regardless
+     * of fetch concurrency.
      *
-     * <p><b>Not thread-safe.</b> {@code graph mine} now drives this from a single
+     * <p><b>Not thread-safe.</b> {@code graph mine} drives this from a single
      * drainer thread fed by the fetch workers, so DB writes never contend with — and
      * fully overlap — the network fetches. Use with try-with-resources; {@link #close()}
      * does a final flush.
      *
-     * <p>Staging tables live in {@code graph.db} but are cleared after every chunk so
-     * they stay tiny; a long run still grows the file, so run {@code db compact
-     * --rewrite} afterwards as with {@code index-sync}.
+     * <p>Staging tables live in {@code graph.sqlite} but are cleared after every chunk
+     * so they stay tiny.
      */
     public MiningWriter openMiningWriter() throws SQLException {
-        return openMiningWriter(null, 0);
+        return new MiningWriter();
     }
 
-    /**
-     * As {@link #openMiningWriter()}, with explicit DuckDB caps: {@code memLimit}
-     * (e.g. "2GB"; null/blank = DuckDB default ~80% RAM) and {@code dbThreads}
-     * (0 = default). On small-RAM machines the flush merges join against the large
-     * pom tables, so cap DuckDB below RAM minus the JVM's footprint.
-     */
-    public MiningWriter openMiningWriter(String memLimit, int dbThreads) throws SQLException {
-        return new MiningWriter(memLimit, dbThreads);
-    }
-
-    /** Bulk, Appender-backed writer for {@code graph mine}; see {@link #openMiningWriter()}. */
+    /** Bulk, batched-statement writer for {@code graph mine}; see {@link #openMiningWriter()}. */
     public final class MiningWriter implements AutoCloseable {
         /** Merge to the real tables once this many POMs have been staged. */
         private static final int FLUSH_EVERY = 4000;
+        /** Execute a staging statement's pending batch once it reaches this many rows. */
+        private static final int BATCH_EVERY = 5000;
 
         private final Connection conn;
-        private final org.duckdb.DuckDBConnection duck;
-        // One appender per coordinate-keyed staging table.
-        private org.duckdb.DuckDBAppender apMeta, apDep, apDm, apProp, apDev, apLic, apMissing;
-        private boolean appendersOpen = false;
+        // One batched prepared statement per coordinate-keyed staging table, plus a
+        // pending-row count so each batch is executed every BATCH_EVERY rows.
+        private final PreparedStatement stMeta, stDep, stDm, stProp, stDev, stLic, stMissing;
+        private int pMeta, pDep, pDm, pProp, pDev, pLic, pMissing;
         private int staged = 0;
 
-        private MiningWriter(String memLimit, int dbThreads) throws SQLException {
+        private MiningWriter() throws SQLException {
             conn = getConnection();
-            // The every-FLUSH_EVERY merge joins staging against the (large) pom tables;
-            // without a spill directory and a memory cap DuckDB defaults to ~80% of
-            // physical RAM *on top of* the JVM — the memory-pressure regime in which
-            // the mine writer segfaulted natively on an 8GB box.
-            applyMemoryGuards(conn, memLimit, dbThreads);
             conn.setAutoCommit(false);
-            duck = conn.unwrap(org.duckdb.DuckDBConnection.class);
             createStaging();
-            conn.commit();      // commit the staging DDL before any appender attaches
-            openAppenders();
+            conn.commit();      // commit the staging DDL before staging any rows
+            stMeta = conn.prepareStatement("INSERT INTO mine_s_meta VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            stDep = conn.prepareStatement("INSERT INTO mine_s_dep VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+            stDm = conn.prepareStatement("INSERT INTO mine_s_dm VALUES (?,?,?,?,?,?,?,?,?,?)");
+            stProp = conn.prepareStatement("INSERT INTO mine_s_prop VALUES (?,?,?,?,?)");
+            stDev = conn.prepareStatement("INSERT INTO mine_s_dev VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
+            stLic = conn.prepareStatement("INSERT INTO mine_s_lic VALUES (?,?,?,?,?,?,?)");
+            stMissing = conn.prepareStatement("INSERT INTO mine_s_missing VALUES (?,?,?)");
         }
 
         /** (Re)create the empty staging tables. Coordinates stand in for artifact ids; nulls are staged as "". */
@@ -465,78 +452,69 @@ public class GraphRepository {
             }
         }
 
-        private void openAppenders() throws SQLException {
-            apMeta    = duck.createAppender("main", "mine_s_meta");
-            apDep     = duck.createAppender("main", "mine_s_dep");
-            apDm      = duck.createAppender("main", "mine_s_dm");
-            apProp    = duck.createAppender("main", "mine_s_prop");
-            apDev     = duck.createAppender("main", "mine_s_dev");
-            apLic     = duck.createAppender("main", "mine_s_lic");
-            apMissing = duck.createAppender("main", "mine_s_missing");
-            appendersOpen = true;
-        }
-
-        private void closeAppenders() throws SQLException {
-            if (!appendersOpen) return;
-            for (org.duckdb.DuckDBAppender a : new org.duckdb.DuckDBAppender[]{apMeta, apDep, apDm, apProp, apDev, apLic, apMissing}) {
-                if (a != null) a.close();
-            }
-            appendersOpen = false;
-        }
-
-        /** Null → "" so the Appender never sees a null string; NULLIF restores SQL NULL at merge for nullable columns. */
+        /** Null → "" so staging never stores a null string; NULLIF restores SQL NULL at merge for nullable columns. */
         private static String s(String v) { return v != null ? v : ""; }
 
         /** Stage one mined POM. Single-threaded (drainer only). Coordinates are the catalogue GAV (see {@code withCoordinates}). */
         public void appendMined(MinedPom p) {
             try {
-                apMeta.beginRow();
-                apMeta.append(s(p.gid())); apMeta.append(s(p.aid())); apMeta.append(s(p.version()));
-                apMeta.append(s(p.packaging()));
-                apMeta.append(s(p.parentGid())); apMeta.append(s(p.parentAid())); apMeta.append(s(p.parentVersion())); apMeta.append(s(p.parentRelPath()));
-                apMeta.append(s(p.name())); apMeta.append(s(p.description())); apMeta.append(s(p.url())); apMeta.append(s(p.inceptionYear()));
-                apMeta.append(s(p.organizationName())); apMeta.append(s(p.organizationUrl()));
-                apMeta.append(s(p.scmUrl())); apMeta.append(s(p.scmConnection())); apMeta.append(s(p.scmDevConnection())); apMeta.append(s(p.scmTag()));
-                apMeta.append(s(p.issueSystem())); apMeta.append(s(p.issueUrl())); apMeta.append(s(p.ciSystem())); apMeta.append(s(p.ciUrl()));
-                apMeta.append(Instant.now().toString());
-                apMeta.endRow();
+                stMeta.setString(1, s(p.gid())); stMeta.setString(2, s(p.aid())); stMeta.setString(3, s(p.version()));
+                stMeta.setString(4, s(p.packaging()));
+                stMeta.setString(5, s(p.parentGid())); stMeta.setString(6, s(p.parentAid()));
+                stMeta.setString(7, s(p.parentVersion())); stMeta.setString(8, s(p.parentRelPath()));
+                stMeta.setString(9, s(p.name())); stMeta.setString(10, s(p.description()));
+                stMeta.setString(11, s(p.url())); stMeta.setString(12, s(p.inceptionYear()));
+                stMeta.setString(13, s(p.organizationName())); stMeta.setString(14, s(p.organizationUrl()));
+                stMeta.setString(15, s(p.scmUrl())); stMeta.setString(16, s(p.scmConnection()));
+                stMeta.setString(17, s(p.scmDevConnection())); stMeta.setString(18, s(p.scmTag()));
+                stMeta.setString(19, s(p.issueSystem())); stMeta.setString(20, s(p.issueUrl()));
+                stMeta.setString(21, s(p.ciSystem())); stMeta.setString(22, s(p.ciUrl()));
+                stMeta.setString(23, Instant.now().toString());
+                stMeta.addBatch();
+                if (++pMeta >= BATCH_EVERY) { stMeta.executeBatch(); pMeta = 0; }
 
                 int ord = 0;
                 for (MinedPom.RawDep d : p.dependencies()) {
-                    apDep.beginRow();
-                    apDep.append(s(p.gid())); apDep.append(s(p.aid())); apDep.append(s(p.version())); apDep.append(ord++);
-                    apDep.append(s(d.gid())); apDep.append(s(d.aid())); apDep.append(s(d.version()));
-                    apDep.append(s(d.scope())); apDep.append(s(d.type())); apDep.append(s(d.classifier())); apDep.append(d.optional());
-                    apDep.endRow();
+                    stDep.setString(1, s(p.gid())); stDep.setString(2, s(p.aid())); stDep.setString(3, s(p.version()));
+                    stDep.setInt(4, ord++);
+                    stDep.setString(5, s(d.gid())); stDep.setString(6, s(d.aid())); stDep.setString(7, s(d.version()));
+                    stDep.setString(8, s(d.scope())); stDep.setString(9, s(d.type())); stDep.setString(10, s(d.classifier()));
+                    stDep.setBoolean(11, d.optional());
+                    stDep.addBatch();
+                    if (++pDep >= BATCH_EVERY) { stDep.executeBatch(); pDep = 0; }
                 }
                 ord = 0;
                 for (MinedPom.RawDep d : p.dependencyManagement()) {
-                    apDm.beginRow();
-                    apDm.append(s(p.gid())); apDm.append(s(p.aid())); apDm.append(s(p.version())); apDm.append(ord++);
-                    apDm.append(s(d.gid())); apDm.append(s(d.aid())); apDm.append(s(d.version()));
-                    apDm.append(s(d.scope())); apDm.append(s(d.type())); apDm.append(s(d.classifier()));
-                    apDm.endRow();
+                    stDm.setString(1, s(p.gid())); stDm.setString(2, s(p.aid())); stDm.setString(3, s(p.version()));
+                    stDm.setInt(4, ord++);
+                    stDm.setString(5, s(d.gid())); stDm.setString(6, s(d.aid())); stDm.setString(7, s(d.version()));
+                    stDm.setString(8, s(d.scope())); stDm.setString(9, s(d.type())); stDm.setString(10, s(d.classifier()));
+                    stDm.addBatch();
+                    if (++pDm >= BATCH_EVERY) { stDm.executeBatch(); pDm = 0; }
                 }
                 for (Map.Entry<String, String> e : p.properties().entrySet()) {
-                    apProp.beginRow();
-                    apProp.append(s(p.gid())); apProp.append(s(p.aid())); apProp.append(s(p.version()));
-                    apProp.append(s(e.getKey())); apProp.append(s(e.getValue()));
-                    apProp.endRow();
+                    stProp.setString(1, s(p.gid())); stProp.setString(2, s(p.aid())); stProp.setString(3, s(p.version()));
+                    stProp.setString(4, s(e.getKey())); stProp.setString(5, s(e.getValue()));
+                    stProp.addBatch();
+                    if (++pProp >= BATCH_EVERY) { stProp.executeBatch(); pProp = 0; }
                 }
                 ord = 0;
                 for (MinedPom.Dev d : p.developers()) {
-                    apDev.beginRow();
-                    apDev.append(s(p.gid())); apDev.append(s(p.aid())); apDev.append(s(p.version())); apDev.append(ord++);
-                    apDev.append(s(d.roleKind())); apDev.append(s(d.id())); apDev.append(s(d.name())); apDev.append(s(d.email()));
-                    apDev.append(s(d.organization())); apDev.append(s(d.organizationUrl())); apDev.append(s(d.url())); apDev.append(s(d.roles()));
-                    apDev.endRow();
+                    stDev.setString(1, s(p.gid())); stDev.setString(2, s(p.aid())); stDev.setString(3, s(p.version()));
+                    stDev.setInt(4, ord++);
+                    stDev.setString(5, s(d.roleKind())); stDev.setString(6, s(d.id())); stDev.setString(7, s(d.name()));
+                    stDev.setString(8, s(d.email())); stDev.setString(9, s(d.organization()));
+                    stDev.setString(10, s(d.organizationUrl())); stDev.setString(11, s(d.url())); stDev.setString(12, s(d.roles()));
+                    stDev.addBatch();
+                    if (++pDev >= BATCH_EVERY) { stDev.executeBatch(); pDev = 0; }
                 }
                 ord = 0;
                 for (MinedPom.License l : p.licenses()) {
-                    apLic.beginRow();
-                    apLic.append(s(p.gid())); apLic.append(s(p.aid())); apLic.append(s(p.version())); apLic.append(ord++);
-                    apLic.append(s(l.name())); apLic.append(s(l.url())); apLic.append(s(l.distribution()));
-                    apLic.endRow();
+                    stLic.setString(1, s(p.gid())); stLic.setString(2, s(p.aid())); stLic.setString(3, s(p.version()));
+                    stLic.setInt(4, ord++);
+                    stLic.setString(5, s(l.name())); stLic.setString(6, s(l.url())); stLic.setString(7, s(l.distribution()));
+                    stLic.addBatch();
+                    if (++pLic >= BATCH_EVERY) { stLic.executeBatch(); pLic = 0; }
                 }
                 maybeFlush();
             } catch (SQLException e) {
@@ -547,9 +525,9 @@ public class GraphRepository {
         /** Stage one missing-POM marker (bulk-applied to {@code meta_versions} at merge). Single-threaded. */
         public void appendMissing(String gid, String aid, String version) {
             try {
-                apMissing.beginRow();
-                apMissing.append(s(gid)); apMissing.append(s(aid)); apMissing.append(s(version));
-                apMissing.endRow();
+                stMissing.setString(1, s(gid)); stMissing.setString(2, s(aid)); stMissing.setString(3, s(version));
+                stMissing.addBatch();
+                if (++pMissing >= BATCH_EVERY) { stMissing.executeBatch(); pMissing = 0; }
                 maybeFlush();
             } catch (SQLException e) {
                 log.error("appendMissing {}:{}:{} failed", gid, aid, version, e);
@@ -560,12 +538,31 @@ public class GraphRepository {
             if (++staged >= FLUSH_EVERY) flush();
         }
 
+        /** Execute every staging statement's pending batch so all staged rows are visible to the merge. */
+        private void drainBatches() throws SQLException {
+            if (pMeta > 0)    { stMeta.executeBatch();    pMeta = 0; }
+            if (pDep > 0)     { stDep.executeBatch();     pDep = 0; }
+            if (pDm > 0)      { stDm.executeBatch();      pDm = 0; }
+            if (pProp > 0)    { stProp.executeBatch();    pProp = 0; }
+            if (pDev > 0)     { stDev.executeBatch();     pDev = 0; }
+            if (pLic > 0)     { stLic.executeBatch();     pLic = 0; }
+            if (pMissing > 0) { stMissing.executeBatch(); pMissing = 0; }
+        }
+
+        /** Discard any un-executed batch rows (recovery path). */
+        private void clearBatchesQuiet() {
+            for (PreparedStatement ps : new PreparedStatement[]{stMeta, stDep, stDm, stProp, stDev, stLic, stMissing}) {
+                try { ps.clearBatch(); } catch (SQLException ignore) { /* ignore */ }
+            }
+            pMeta = pDep = pDm = pProp = pDev = pLic = pMissing = 0;
+        }
+
         /**
-         * Flush staged rows to the real tables and clear staging. Closes the appenders
-         * (so their rows are visible), assigns artifact ids set-based, clears any prior
-         * {@code pom_*} rows for the staged coordinates (idempotent re-mine), inserts
+         * Flush staged rows to the real tables and clear staging. Executes the pending
+         * batches (so their rows are visible), assigns artifact ids set-based, clears any
+         * prior {@code pom_*} rows for the staged coordinates (idempotent re-mine), inserts
          * all child rows by joining on coordinates, applies missing markers, then
-         * truncates staging and reopens the appenders. NULLIF restores SQL NULL for the
+         * truncates staging. NULLIF restores SQL NULL for the
          * nullable text columns (parent/identity/scm/dep coordinates/scope/dev/licence);
          * columns the parser never leaves null ({@code packaging}, {@code dep_type},
          * {@code dep_classifier}, {@code prop_*}, {@code role_kind}, {@code mined_at})
@@ -573,14 +570,13 @@ public class GraphRepository {
          */
         public void flush() {
             try {
-                closeAppenders();
+                drainBatches();
                 try (Statement st = conn.createStatement()) {
-                    // 1. Assign ids to staged coordinates not already in `artifacts`.
-                    st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) " +
-                            "SELECT nextval('seq_artifact_id'), s.gid, s.aid, s.version, '' " +
-                            "FROM (SELECT DISTINCT gid, aid, version FROM mine_s_meta) s " +
-                            "WHERE NOT EXISTS (SELECT 1 FROM artifacts a " +
-                            "  WHERE a.gid = s.gid AND a.aid = s.aid AND a.version = s.version AND a.classifier = '')");
+                    // 1. Assign ids to staged coordinates not already in `artifacts`
+                    //    (id omitted — rowid alias; INSERT OR IGNORE dedups against the
+                    //    UNIQUE(gid,aid,version,classifier) constraint).
+                    st.execute("INSERT OR IGNORE INTO artifacts (gid, aid, version, classifier) " +
+                            "SELECT DISTINCT gid, aid, version, '' FROM mine_s_meta");
 
                     // 2. Idempotent clear: drop any prior pom_* rows for the staged artifacts
                     //    (one set-based delete per table per chunk, vs 6 per POM before).
@@ -624,8 +620,7 @@ public class GraphRepository {
                             "SELECT a.id, s.ord, NULLIF(s.name,''), NULLIF(s.url,''), NULLIF(s.distribution,'') " +
                             "FROM mine_s_lic s JOIN artifacts a ON a.gid = s.gid AND a.aid = s.aid AND a.version = s.version AND a.classifier = ''");
 
-                    // 4. Bulk-apply missing markers via correlated EXISTS (DuckDB doesn't
-                    //    accept the row-value "(ga_id, version) IN (SELECT two cols)" form).
+                    // 4. Bulk-apply missing markers via correlated EXISTS.
                     st.execute("UPDATE meta_versions AS mv SET missing_pom = TRUE " +
                             "WHERE EXISTS (" +
                             "  SELECT 1 FROM mine_s_missing s " +
@@ -643,21 +638,23 @@ public class GraphRepository {
                 }
                 conn.commit();
                 staged = 0;
-                openAppenders();
             } catch (SQLException e) {
                 log.error("graph-mine flush failed (chunk of {} dropped; those versions stay un-mined and resume next run)", staged, e);
-                // Recover so the drainer can keep going: roll back the half-merged chunk and start a clean staging buffer.
+                // Recover so the drainer can keep going: roll back the half-merged chunk
+                // (staged rows were inserted inside this transaction, so the rollback also
+                // empties staging) and discard any un-executed batch rows.
                 try { conn.rollback(); } catch (SQLException ignore) { /* ignore */ }
+                clearBatchesQuiet();
                 staged = 0;
-                try { if (!appendersOpen) { createStaging(); openAppenders(); conn.commit(); } }
-                catch (SQLException re) { log.error("graph-mine flush recovery failed", re); }
             }
         }
 
         @Override
         public void close() {
             try { flush(); } catch (Exception e) { log.error("final graph-mine flush failed", e); }
-            try { closeAppenders(); } catch (SQLException ignore) { /* ignore */ }
+            for (PreparedStatement ps : new PreparedStatement[]{stMeta, stDep, stDm, stProp, stDev, stLic, stMissing}) {
+                try { if (ps != null) ps.close(); } catch (SQLException ignore) { /* ignore */ }
+            }
             try (Statement st = conn.createStatement()) {
                 st.execute("DROP TABLE IF EXISTS mine_s_meta");
                 st.execute("DROP TABLE IF EXISTS mine_s_dep");
@@ -704,8 +701,9 @@ public class GraphRepository {
     public record GoblinImportStats(long artifactsAdded, long edgesAdded, long rowsRead, long rowsSkipped) {}
 
     /**
-     * Bulk-load a Goblin dependency-edge CSV into {@code artifacts}/{@code dependencies},
-     * set-based via DuckDB (no row-by-row JDBC). The CSV is the export of Goblin's
+     * Bulk-load a Goblin dependency-edge CSV into {@code artifacts}/{@code dependencies}:
+     * the CSV is parsed and pre-split in Java, streamed into a staging table with
+     * batched inserts, then merged set-based. The CSV is the export of Goblin's
      * {@code (Release)-[:dependency]->(Artifact)} relationships, one row per edge with
      * header columns {@code source,targetArtifact,targetVersion,scope} where
      * {@code source} is {@code g:a:v}, {@code targetArtifact} is {@code g:a}, and
@@ -715,64 +713,194 @@ public class GraphRepository {
      * {@code graph deps}). {@code targetVersion} is occasionally a version <em>range</em>
      * rather than a concrete version; unless {@code includeRanges} is set, those edges
      * (and their non-existent child release) are skipped. Idempotent:
-     * {@code INSERT OR IGNORE} on edges and existence-checked artifact inserts, so it
+     * {@code INSERT OR IGNORE} on both artifacts and edges, so it
      * can be re-run or layered on top of an existing graph.
      */
     public GoblinImportStats importGoblinEdges(File edgesCsv, boolean includeRanges) {
-        String path = edgesCsv.getAbsolutePath().replace("'", "''");
         // A "concrete" child version has no range/property syntax. LIKE (not regex) to keep escaping simple.
         String concrete = "(cver IS NOT NULL AND cver <> '' "
                 + "AND cver NOT LIKE '%[%' AND cver NOT LIKE '%]%' AND cver NOT LIKE '%(%' "
                 + "AND cver NOT LIKE '%)%' AND cver NOT LIKE '%,%' AND cver NOT LIKE '%$%')";
-        String childWhere = includeRanges ? "TRUE" : concrete;
+        String childWhere = includeRanges ? "1=1" : concrete;
 
         long artBefore = 0, depBefore = 0, artAfter = 0, depAfter = 0, rows = 0, kept = 0;
-        try (Connection conn = getConnection(); Statement st = conn.createStatement()) {
+        try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
 
-            // Stage well-formed rows (source has g:a:v, target has g:a), pre-split.
-            st.execute("CREATE TEMP TABLE ge AS SELECT "
-                    + "split_part(\"source\", ':', 1) AS pgid, split_part(\"source\", ':', 2) AS paid, split_part(\"source\", ':', 3) AS pver, "
-                    + "split_part(\"targetArtifact\", ':', 1) AS cgid, split_part(\"targetArtifact\", ':', 2) AS caid, "
-                    + "\"targetVersion\" AS cver, \"scope\" AS scp "
-                    + "FROM read_csv_auto('" + path + "', header=true) "
-                    + "WHERE (length(\"source\") - length(replace(\"source\", ':', ''))) = 2 "
-                    + "AND (length(\"targetArtifact\") - length(replace(\"targetArtifact\", ':', ''))) = 1");
+            try (Statement st = conn.createStatement()) {
+                st.execute("DROP TABLE IF EXISTS ge");
+                st.execute("CREATE TEMP TABLE ge (pgid VARCHAR, paid VARCHAR, pver VARCHAR, "
+                        + "cgid VARCHAR, caid VARCHAR, cver VARCHAR, scp VARCHAR)");
+            }
 
-            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM ge")) { rs.next(); rows = rs.getLong(1); }
-            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM ge WHERE " + childWhere)) { rs.next(); kept = rs.getLong(1); }
-            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM artifacts")) { rs.next(); artBefore = rs.getLong(1); }
-            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies")) { rs.next(); depBefore = rs.getLong(1); }
+            // Stage well-formed rows (source has g:a:v, target has g:a), split in Java.
+            // Malformed rows (wrong colon count / missing columns) are dropped, matching
+            // the old SQL-side filter.
+            try (Reader in = new BufferedReader(new InputStreamReader(
+                         Files.newInputStream(edgesCsv.toPath()), StandardCharsets.UTF_8));
+                 PreparedStatement ins = conn.prepareStatement(
+                         "INSERT INTO ge (pgid, paid, pver, cgid, caid, cver, scp) VALUES (?,?,?,?,?,?,?)")) {
+                CsvParser csv = new CsvParser(in);
+                List<String> header = csv.next();
+                if (header == null) {
+                    log.error("importGoblinEdges: {} is empty", edgesCsv);
+                    conn.rollback();
+                    return new GoblinImportStats(0, 0, 0, 0);
+                }
+                int iSource = header.indexOf("source");
+                int iTarget = header.indexOf("targetArtifact");
+                int iVersion = header.indexOf("targetVersion");
+                int iScope = header.indexOf("scope");
+                if (iSource < 0 || iTarget < 0 || iVersion < 0) {
+                    log.error("importGoblinEdges: {} is missing required header columns "
+                            + "source/targetArtifact/targetVersion (found: {})", edgesCsv, header);
+                    conn.rollback();
+                    return new GoblinImportStats(0, 0, 0, 0);
+                }
+                int pending = 0;
+                List<String> rec;
+                while ((rec = csv.next()) != null) {
+                    String source = field(rec, iSource);
+                    String target = field(rec, iTarget);
+                    if (source == null || target == null) continue;       // ragged row
+                    String[] sp = source.split(":", -1);
+                    String[] tp = target.split(":", -1);
+                    if (sp.length != 3 || tp.length != 2) continue;       // wrong colon count
+                    ins.setString(1, sp[0]);
+                    ins.setString(2, sp[1]);
+                    ins.setString(3, sp[2]);
+                    ins.setString(4, tp[0]);
+                    ins.setString(5, tp[1]);
+                    ins.setString(6, field(rec, iVersion));
+                    ins.setString(7, iScope >= 0 ? field(rec, iScope) : null);
+                    ins.addBatch();
+                    rows++;
+                    if (++pending >= 5000) { ins.executeBatch(); pending = 0; }
+                }
+                if (pending > 0) ins.executeBatch();
+            }
 
-            // Distinct GAVs: all parents (always concrete) + concrete children.
-            st.execute("CREATE TEMP TABLE ge_gav AS "
-                    + "SELECT DISTINCT pgid AS gid, paid AS aid, pver AS version FROM ge "
-                    + "UNION SELECT DISTINCT cgid, caid, cver FROM ge WHERE " + childWhere);
+            try (Statement st = conn.createStatement()) {
+                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM ge WHERE " + childWhere)) { rs.next(); kept = rs.getLong(1); }
+                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM artifacts")) { rs.next(); artBefore = rs.getLong(1); }
+                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies")) { rs.next(); depBefore = rs.getLong(1); }
 
-            // Insert only the GAVs we don't already have (classifier '').
-            st.execute("INSERT INTO artifacts (id, gid, aid, version, classifier) "
-                    + "SELECT nextval('seq_artifact_id'), gid, aid, version, '' FROM ge_gav g "
-                    + "WHERE g.gid <> '' AND g.aid <> '' AND g.version IS NOT NULL AND g.version <> '' "
-                    + "AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.gid = g.gid AND a.aid = g.aid AND a.version = g.version AND a.classifier = '')");
+                // Distinct GAVs: all parents (always concrete) + concrete children.
+                st.execute("CREATE TEMP TABLE ge_gav AS "
+                        + "SELECT DISTINCT pgid AS gid, paid AS aid, pver AS version FROM ge "
+                        + "UNION SELECT DISTINCT cgid, caid, cver FROM ge WHERE " + childWhere);
 
-            // Insert edges, mapping coordinates to ids. INSERT OR IGNORE => idempotent.
-            st.execute("INSERT OR IGNORE INTO dependencies (parent_id, child_id, scope) "
-                    + "SELECT p.id, c.id, COALESCE(e.scp, '') FROM ge e "
-                    + "JOIN artifacts p ON p.gid = e.pgid AND p.aid = e.paid AND p.version = e.pver AND p.classifier = '' "
-                    + "JOIN artifacts c ON c.gid = e.cgid AND c.aid = e.caid AND c.version = e.cver AND c.classifier = '' "
-                    + "WHERE " + childWhere + " AND p.id <> c.id");
+                // Insert only the GAVs we don't already have (classifier ''); id omitted
+                // (rowid alias), OR IGNORE dedups on UNIQUE(gid,aid,version,classifier).
+                st.execute("INSERT OR IGNORE INTO artifacts (gid, aid, version, classifier) "
+                        + "SELECT gid, aid, version, '' FROM ge_gav g "
+                        + "WHERE g.gid <> '' AND g.aid <> '' AND g.version IS NOT NULL AND g.version <> ''");
 
-            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM artifacts")) { rs.next(); artAfter = rs.getLong(1); }
-            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies")) { rs.next(); depAfter = rs.getLong(1); }
+                // Insert edges, mapping coordinates to ids. INSERT OR IGNORE => idempotent.
+                st.execute("INSERT OR IGNORE INTO dependencies (parent_id, child_id, scope) "
+                        + "SELECT p.id, c.id, COALESCE(e.scp, '') FROM ge e "
+                        + "JOIN artifacts p ON p.gid = e.pgid AND p.aid = e.paid AND p.version = e.pver AND p.classifier = '' "
+                        + "JOIN artifacts c ON c.gid = e.cgid AND c.aid = e.caid AND c.version = e.cver AND c.classifier = '' "
+                        + "WHERE " + childWhere + " AND p.id <> c.id");
 
-            st.execute("DROP TABLE IF EXISTS ge_gav");
-            st.execute("DROP TABLE IF EXISTS ge");
+                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM artifacts")) { rs.next(); artAfter = rs.getLong(1); }
+                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies")) { rs.next(); depAfter = rs.getLong(1); }
+
+                st.execute("DROP TABLE IF EXISTS ge_gav");
+                st.execute("DROP TABLE IF EXISTS ge");
+            }
             conn.commit();
-        } catch (SQLException e) {
+        } catch (SQLException | IOException e) {
             log.error("importGoblinEdges failed for {}", edgesCsv, e);
             return new GoblinImportStats(0, 0, 0, 0);
         }
         return new GoblinImportStats(artAfter - artBefore, depAfter - depBefore, rows, rows - kept);
+    }
+
+    /** Field {@code i} of a parsed record, or null when the row is too short. */
+    private static String field(List<String> rec, int i) {
+        return i < rec.size() ? rec.get(i) : null;
+    }
+
+    /**
+     * Minimal streaming CSV parser, RFC-4180-enough for the Goblin export: quoted
+     * fields with embedded commas, doubled-quote escapes, and embedded newlines;
+     * accepts LF, CRLF and lone-CR record terminators; skips a leading UTF-8 BOM.
+     * Unquoted fields are read verbatim (a stray quote mid-field is kept literally).
+     */
+    private static final class CsvParser {
+        private final Reader in;
+        private int pushback = -2;
+        private boolean first = true;
+
+        CsvParser(Reader in) {
+            this.in = in;
+        }
+
+        /** Next record's fields, or null at end of input. */
+        List<String> next() throws IOException {
+            int c = read();
+            if (first) {
+                first = false;
+                if (c == 0xFEFF) c = read();   // skip UTF-8 BOM
+            }
+            if (c == -1) return null;
+            List<String> fields = new ArrayList<>();
+            StringBuilder f = new StringBuilder();
+            boolean inQuotes = false;
+            boolean fieldStart = true;
+            while (true) {
+                if (c == -1) {                        // EOF ends the last record
+                    fields.add(f.toString());
+                    return fields;
+                }
+                if (inQuotes) {
+                    if (c == '"') {
+                        int n = read();
+                        if (n == '"') {
+                            f.append('"');            // escaped quote
+                        } else {
+                            inQuotes = false;         // closing quote
+                            unread(n);
+                        }
+                    } else {
+                        f.append((char) c);           // includes commas and newlines
+                    }
+                } else if (c == '"' && fieldStart) {
+                    inQuotes = true;
+                    fieldStart = false;
+                } else if (c == ',') {
+                    fields.add(f.toString());
+                    f.setLength(0);
+                    fieldStart = true;
+                } else if (c == '\r') {
+                    int n = read();
+                    if (n != '\n') unread(n);         // lone CR terminator
+                    fields.add(f.toString());
+                    return fields;
+                } else if (c == '\n') {
+                    fields.add(f.toString());
+                    return fields;
+                } else {
+                    f.append((char) c);
+                    fieldStart = false;
+                }
+                c = read();
+            }
+        }
+
+        private int read() throws IOException {
+            if (pushback != -2) {
+                int c = pushback;
+                pushback = -2;
+                return c;
+            }
+            return in.read();
+        }
+
+        private void unread(int c) {
+            pushback = c;
+        }
     }
 
     /** Stats from {@link #exportNeo4jCsv}. */
@@ -790,52 +918,80 @@ public class GraphRepository {
      *   <li>{@code deps.csv} — {@code (Release)-[:dependency {targetVersion, scope}]->(Artifact)} edges
      *       (target is the dependency's library; the concrete version rides on the edge, as in Goblin).</li>
      * </ul>
-     * DuckDB writes the CSVs directly ({@code COPY}); this is read-only on the DB.
+     * The CSVs are written in Java over streamed ResultSets (RFC-4180 quoting, NULL as
+     * empty); the database is opened read-only.
      */
     public Neo4jExportStats exportNeo4jCsv(File outDir, boolean withMetadata) {
         if (!outDir.exists() && !outDir.mkdirs()) {
             log.error("could not create Neo4j export dir {}", outDir);
             return new Neo4jExportStats(0, 0, 0);
         }
-        String dir = outDir.getAbsolutePath();
 
         String releaseSelect = withMetadata
-                ? "SELECT a.gid || ':' || a.aid || ':' || a.version AS \"id:ID(Release)\", a.version AS \"version\", "
-                  + "a.gid AS \"gid\", a.aid AS \"aid\", m.name AS \"name\", m.url AS \"url\", m.scm_url AS \"scmUrl\" "
+                ? "SELECT a.gid || ':' || a.aid || ':' || a.version, a.version, a.gid, a.aid, m.name, m.url, m.scm_url "
                   + "FROM artifacts a LEFT JOIN pom_meta m ON m.artifact_id = a.id WHERE a.classifier = ''"
-                : "SELECT gid || ':' || aid || ':' || version AS \"id:ID(Release)\", version AS \"version\", "
-                  + "gid AS \"gid\", aid AS \"aid\" FROM artifacts WHERE classifier = ''";
+                : "SELECT gid || ':' || aid || ':' || version, version, gid, aid "
+                  + "FROM artifacts WHERE classifier = ''";
+        String[] releaseHeader = withMetadata
+                ? new String[]{"id:ID(Release)", "version", "gid", "aid", "name", "url", "scmUrl"}
+                : new String[]{"id:ID(Release)", "version", "gid", "aid"};
 
         long releases = 0, libraries = 0, edges = 0;
-        try (Connection conn = getConnection(); Statement st = conn.createStatement()) {
-            st.execute("COPY (" + releaseSelect + ") TO '" + csvPath(dir, "releases.csv") + "' (FORMAT CSV, HEADER)");
+        try (Connection conn = Sqlite.openReadOnly(dbPath); Statement st = conn.createStatement()) {
+            writeCsv(new File(outDir, "releases.csv"), releaseHeader, st, releaseSelect);
 
-            st.execute("COPY (SELECT DISTINCT gid || ':' || aid AS \"id:ID(Artifact)\", gid AS \"gid\", aid AS \"aid\" "
-                    + "FROM artifacts WHERE classifier = '') TO '" + csvPath(dir, "libraries.csv") + "' (FORMAT CSV, HEADER)");
+            writeCsv(new File(outDir, "libraries.csv"),
+                    new String[]{"id:ID(Artifact)", "gid", "aid"}, st,
+                    "SELECT DISTINCT gid || ':' || aid, gid, aid FROM artifacts WHERE classifier = ''");
 
-            st.execute("COPY (SELECT DISTINCT gid || ':' || aid AS \":START_ID(Artifact)\", "
-                    + "gid || ':' || aid || ':' || version AS \":END_ID(Release)\" "
-                    + "FROM artifacts WHERE classifier = '') TO '" + csvPath(dir, "rel_ar.csv") + "' (FORMAT CSV, HEADER)");
+            writeCsv(new File(outDir, "rel_ar.csv"),
+                    new String[]{":START_ID(Artifact)", ":END_ID(Release)"}, st,
+                    "SELECT DISTINCT gid || ':' || aid, gid || ':' || aid || ':' || version "
+                            + "FROM artifacts WHERE classifier = ''");
 
-            st.execute("COPY (SELECT p.gid || ':' || p.aid || ':' || p.version AS \":START_ID(Release)\", "
-                    + "c.gid || ':' || c.aid AS \":END_ID(Artifact)\", c.version AS \"targetVersion\", "
-                    + "COALESCE(d.scope, '') AS \"scope\" "
-                    + "FROM dependencies d JOIN artifacts p ON p.id = d.parent_id JOIN artifacts c ON c.id = d.child_id) "
-                    + "TO '" + csvPath(dir, "deps.csv") + "' (FORMAT CSV, HEADER)");
+            writeCsv(new File(outDir, "deps.csv"),
+                    new String[]{":START_ID(Release)", ":END_ID(Artifact)", "targetVersion", "scope"}, st,
+                    "SELECT p.gid || ':' || p.aid || ':' || p.version, c.gid || ':' || c.aid, c.version, "
+                            + "COALESCE(d.scope, '') "
+                            + "FROM dependencies d JOIN artifacts p ON p.id = d.parent_id JOIN artifacts c ON c.id = d.child_id");
 
             try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM artifacts WHERE classifier = ''")) { rs.next(); releases = rs.getLong(1); }
             try (ResultSet rs = st.executeQuery("SELECT COUNT(DISTINCT gid || ':' || aid) FROM artifacts WHERE classifier = ''")) { rs.next(); libraries = rs.getLong(1); }
             try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM dependencies")) { rs.next(); edges = rs.getLong(1); }
-        } catch (SQLException e) {
+        } catch (SQLException | IOException e) {
             log.error("exportNeo4jCsv failed", e);
             return new Neo4jExportStats(0, 0, 0);
         }
         return new Neo4jExportStats(releases, libraries, edges);
     }
 
-    /** Build a single-quote-escaped CSV file path for embedding in a DuckDB COPY statement. */
-    private static String csvPath(String dir, String name) {
-        return (dir + "/" + name).replace("'", "''");
+    /** Stream {@code sql}'s result to {@code out} as CSV with a fixed header row. */
+    private static void writeCsv(File out, String[] header, Statement st, String sql) throws SQLException, IOException {
+        try (ResultSet rs = st.executeQuery(sql);
+             BufferedWriter w = Files.newBufferedWriter(out.toPath(), StandardCharsets.UTF_8)) {
+            int cols = header.length;
+            writeCsvRow(w, header);
+            String[] row = new String[cols];
+            while (rs.next()) {
+                for (int i = 0; i < cols; i++) row[i] = rs.getString(i + 1);
+                writeCsvRow(w, row);
+            }
+        }
+    }
+
+    private static void writeCsvRow(BufferedWriter w, String[] fields) throws IOException {
+        for (int i = 0; i < fields.length; i++) {
+            if (i > 0) w.write(',');
+            w.write(csvField(fields[i]));
+        }
+        w.write('\n');
+    }
+
+    /** RFC-4180 field encoding: NULL → empty; quote only when the value needs it. */
+    private static String csvField(String v) {
+        if (v == null) return "";
+        if (v.indexOf(',') < 0 && v.indexOf('"') < 0 && v.indexOf('\n') < 0 && v.indexOf('\r') < 0) return v;
+        return '"' + v.replace("\"", "\"\"") + '"';
     }
 
 }

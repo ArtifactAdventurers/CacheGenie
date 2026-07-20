@@ -32,6 +32,7 @@
     <skipITs>true</skipITs>
     <surefire-plugin.version>3.3.1</surefire-plugin.version>
     <duckdb.version>1.5.4.0</duckdb.version>
+    <sqlite.version>3.53.2.0</sqlite.version>
 
 
 
@@ -150,6 +151,14 @@
     <groupId>org.duckdb</groupId>
     <artifactId>duckdb_jdbc</artifactId>
     <version>${duckdb.version}</version>
+  </dependency>
+  <!-- SQLite is the system of record (see MIGRATION-SQLITE.md); duckdb_jdbc
+       remains only for the one-off 'db migrate-sqlite' copier and is removed
+       once migration is complete. -->
+  <dependency>
+    <groupId>org.xerial</groupId>
+    <artifactId>sqlite-jdbc</artifactId>
+    <version>${sqlite.version}</version>
   </dependency>
 
 </dependencies>

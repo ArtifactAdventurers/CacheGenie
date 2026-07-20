@@ -13,7 +13,7 @@ import java.net.URI;
         description = "Build and maintain a queryable database of Maven artifacts, their direct dependencies, and risk annotations.",
         header = {
                 "CacheGenie discovers Maven artifacts, mines their POMs for facts and direct",
-                "dependencies into a local DuckDB database, and keeps a local POM/metadata cache",
+                "dependencies into a local SQLite database, and keeps a local POM/metadata cache",
                 "as a byproduct. Dependency graphs and stats are then queries over that database."
         },
         footer = {
@@ -30,13 +30,13 @@ import java.net.URI;
                 "  - fetch (meta)     : Download a specific POM onto disk.",
                 "",
                 "Analysis:",
-                "  - graph query      : Execute SQL (incl. recursive CTEs) against the DuckDB graph.",
+                "  - graph query      : Execute SQL (incl. recursive CTEs) against the SQLite graph.",
                 "  - graph stats      : Graph and discovery-metadata statistics (quick snapshot).",
                 "  - insights         : Ecosystem evolution reports (arrivals, lifecycle, abandonment, dependency churn).",
                 "",
                 "Data Locations:",
                 "  - Local Repository : Artifacts (JARs/POMs) in your Maven repository (default: ~/.m2/repository).",
-                "  - Graph database   : Catalogue + dependency graph in ~/.m2/cachegenie/graph.db (DuckDB).",
+                "  - Graph database   : Catalogue + dependency graph in ~/.m2/cachegenie/graph.sqlite (SQLite).",
                 "",
                 "Example (keep current):",
                 "  cachegenie index-sync",

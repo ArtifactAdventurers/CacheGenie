@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.net.URI;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -22,11 +21,12 @@ import java.util.Set;
 
 /**
  * Persists CacheGenie discovery metadata ({@link MavenMetaData}) into the same
- * DuckDB database used for the dependency graph ({@code ~/.m2/cachegenie/graph.db}),
- * so meta and graph can be queried together.
+ * SQLite database used for the dependency graph
+ * ({@code ~/.m2/cachegenie/graph.sqlite}), so meta and graph can be queried
+ * together.
  *
  * <p>This replaces the per-group-artifact {@code .properties} / {@code .json}
- * files; metadata now lives solely in DuckDB.
+ * files; metadata now lives solely in the database.
  *
  * <p>Two tables:
  * <ul>
@@ -35,61 +35,42 @@ import java.util.Set;
  *       artifact, carrying the publish timestamp and a missing-POM flag.</li>
  * </ul>
  *
- * <p>Timestamps are stored as ISO-8601 strings (VARCHAR) to avoid DuckDB
- * timestamp/Instant timezone conversion surprises; they round-trip through
- * {@link Instant#toString()} / {@link Instant#parse(CharSequence)}.
+ * <p>Timestamps are stored as ISO-8601 strings (VARCHAR); they round-trip
+ * through {@link Instant#toString()} / {@link Instant#parse(CharSequence)} and
+ * sort correctly as text.
  *
- * <p>Threading: DuckDB allows only a single writer per file from a process.
- * Each public method opens and closes its own connection, and write methods
- * are {@code synchronized} so concurrent callers (e.g. the parallel meta walk)
- * serialise their writes.
+ * <p>Threading: SQLite (in WAL mode, see {@link Sqlite}) allows concurrent
+ * readers alongside one writer, but writers still serialise. Each public
+ * method opens and closes its own connection, and write methods are
+ * {@code synchronized} so concurrent callers (e.g. the parallel meta walk)
+ * serialise their writes in-process rather than contending on the DB lock.
  */
 public class MetaRepository {
     private static final Logger log = LoggerFactory.getLogger(MetaRepository.class);
     private final String dbPath;
 
     public MetaRepository(File cacheGenieRoot) {
-        this.dbPath = new File(cacheGenieRoot, "graph.db").getAbsolutePath();
+        this.dbPath = Sqlite.dbPath(cacheGenieRoot);
         initSchema();
     }
 
+    /** Read-write connection (creates the file if absent). */
     private Connection getConnection() throws SQLException {
-        return DriverManager.getConnection("jdbc:duckdb:" + dbPath);
+        return Sqlite.open(dbPath);
     }
 
     /**
-     * Point DuckDB at an explicit spill directory (next to the database), stream large
-     * {@code INSERT ... SELECT} results instead of buffering them to preserve row order,
-     * and optionally cap DuckDB's memory/threads — so a big set-based merge spills to
-     * disk rather than exhausting RAM alongside the JVM (the OS OOM-killer trap the
-     * {@code index-sync} full merge hit at ~20M staged records). Mirrors
-     * {@code PomResolver.applyMemoryGuards}; settings are DB-wide while the database is
-     * open in this process. Best-effort: failures are logged and work proceeds on
-     * defaults.
+     * Read-only connection for purely-reading methods. Safe once the constructor
+     * has run ({@link #initSchema()} creates the file), and under WAL it never
+     * blocks or is blocked by the writer.
      */
-    private void applyMemoryGuards(Connection conn, String memLimit, int dbThreads) {
-        String tempDir = (dbPath + ".tmp").replace("'", "''");
-        try (Statement st = conn.createStatement()) {
-            st.execute("SET temp_directory = '" + tempDir + "'");
-            try { st.execute("SET preserve_insertion_order = false"); } catch (SQLException ignore) { /* older DuckDB */ }
-            if (dbThreads > 0) {
-                st.execute("SET threads = " + dbThreads);
-            }
-            if (memLimit != null && !memLimit.isBlank()) {
-                st.execute("SET memory_limit = '" + memLimit.trim().replace("'", "''") + "'");
-            }
-            log.info("Index-stage DB guards: memory_limit={}, threads={}, preserve_insertion_order=false, temp_directory={}.tmp",
-                    (memLimit != null && !memLimit.isBlank()) ? memLimit.trim() : "<default ~80% RAM>",
-                    dbThreads > 0 ? dbThreads : "<default: one per core>", dbPath);
-        } catch (SQLException e) {
-            log.warn("Could not apply DuckDB memory guards (continuing on defaults): {}", e.getMessage());
-        }
+    private Connection getReadConnection() throws SQLException {
+        return Sqlite.openReadOnly(dbPath);
     }
 
     private void initSchema() {
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement()) {
-            stmt.execute("CREATE SEQUENCE IF NOT EXISTS seq_meta_artifact_id");
             stmt.execute("CREATE TABLE IF NOT EXISTS meta_artifacts (" +
                     "id INTEGER PRIMARY KEY," +
                     "gid VARCHAR," +
@@ -115,13 +96,18 @@ public class MetaRepository {
                     "has_javadoc BOOLEAN," +
                     "PRIMARY KEY (ga_id, version))");
             // Backfill columns on databases created before these were added.
+            // (SQLite has no ADD COLUMN IF NOT EXISTS; a duplicate-column error
+            // just means the column is already there.)
             for (String col : new String[]{
                     "packaging VARCHAR", "file_extension VARCHAR", "file_size BIGINT",
                     "sha1 VARCHAR", "sha256 VARCHAR", "has_sources BOOLEAN", "has_javadoc BOOLEAN"}) {
                 try {
-                    stmt.execute("ALTER TABLE meta_versions ADD COLUMN IF NOT EXISTS " + col);
-                } catch (SQLException ignore) { /* older DuckDB without IF NOT EXISTS: column likely exists */ }
+                    stmt.execute("ALTER TABLE meta_versions ADD COLUMN " + col);
+                } catch (SQLException ignore) { /* duplicate column name: already present */ }
             }
+            // Indexes the point-lookup paths rely on. The (gid,aid) UNIQUE table
+            // constraint above already creates its index; ga_id needs an explicit one.
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_meta_versions_ga ON meta_versions(ga_id)");
             log.debug("Meta schema initialised at {}", dbPath);
         } catch (SQLException e) {
             log.error("Failed to initialise meta schema", e);
@@ -155,7 +141,7 @@ public class MetaRepository {
      */
     public Map<String, Instant> loadLastChecked() {
         Map<String, Instant> out = new HashMap<>();
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT gid, aid, generated FROM meta_artifacts")) {
             while (rs.next()) {
@@ -189,7 +175,7 @@ public class MetaRepository {
         if (since != null) { sql.append(" AND v.published IS NOT NULL AND v.published >= ?"); params.add(since.toString()); }
 
         List<String[]> out = new ArrayList<>();
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
             try (ResultSet rs = ps.executeQuery()) {
@@ -224,7 +210,7 @@ public class MetaRepository {
         if (limit > 0) { sql.append(" LIMIT ").append(limit); } // bounded chunk for a polite drip
 
         List<String[]> out = new ArrayList<>();
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
             try (ResultSet rs = ps.executeQuery()) {
@@ -268,8 +254,8 @@ public class MetaRepository {
         if (version != null) { sql.append(" AND v.version = ?"); params.add(version); }
         if (since != null) { sql.append(" AND v.published IS NOT NULL AND v.published >= ?"); params.add(since.toString()); }
         if (after != null) {
-            // Lexicographic keyset predicate over (gid, aid, version), spelled out so it works
-            // regardless of DuckDB row-comparison support.
+            // Lexicographic keyset predicate over (gid, aid, version), spelled out so it
+            // doesn't rely on row-value comparison support.
             sql.append(" AND (a.gid > ?")
                .append(" OR (a.gid = ? AND a.aid > ?)")
                .append(" OR (a.gid = ? AND a.aid = ? AND v.version > ?))");
@@ -281,7 +267,7 @@ public class MetaRepository {
         sql.append(" LIMIT ").append(Math.max(1, pageSize)); // bounded page
 
         List<String[]> out = new ArrayList<>();
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
             try (ResultSet rs = ps.executeQuery()) {
@@ -308,7 +294,7 @@ public class MetaRepository {
         if (aid != null) { sql.append(" AND a.aid = ?"); params.add(aid); }
         if (version != null) { sql.append(" AND v.version = ?"); params.add(version); }
         if (since != null) { sql.append(" AND v.published IS NOT NULL AND v.published >= ?"); params.add(since.toString()); }
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             for (int i = 0; i < params.size(); i++) ps.setString(i + 1, params.get(i));
             try (ResultSet rs = ps.executeQuery()) {
@@ -351,12 +337,15 @@ public class MetaRepository {
                     }
                 }
                 if (newArtifact) {
+                    // id is an INTEGER PRIMARY KEY (rowid alias): omit it and let
+                    // SQLite assign, then read it back on the same connection.
                     try (PreparedStatement ins = conn.prepareStatement(
-                            "INSERT INTO meta_artifacts (id, gid, aid) VALUES (nextval('seq_meta_artifact_id'), ?, ?) RETURNING id")) {
+                            "INSERT INTO meta_artifacts (gid, aid) VALUES (?, ?)")) {
                         ins.setString(1, meta.gid);
                         ins.setString(2, meta.aid);
-                        try (ResultSet rs = ins.executeQuery()) { rs.next(); gaId = rs.getInt(1); }
+                        ins.executeUpdate();
                     }
+                    gaId = lastInsertRowId(conn);
                 }
 
                 updateArtifactFields(conn, gaId, meta);
@@ -410,6 +399,48 @@ public class MetaRepository {
         return new IndexSyncWriter();
     }
 
+    /**
+     * SQL that recomputes {@code generated}/{@code latest}/{@code release} for every
+     * artifact whose id is produced by {@code scopeSubquery}. {@code latest} is the
+     * version with the newest publish date (Maven's "last deployed" semantics);
+     * {@code release} is the same excluding {@code -SNAPSHOT} versions;
+     * {@code release} falls back to {@code latest} when only snapshots exist.
+     *
+     * <p>Replaces DuckDB's {@code arg_max(version, published)} (+ {@code FILTER})
+     * with {@code ROW_NUMBER() OVER (... ORDER BY published DESC NULLS LAST)}.
+     * Like {@code arg_max}, rows with a NULL {@code published} are never chosen
+     * (the {@code published IS NOT NULL} guards), so an artifact whose versions all
+     * lack publish dates gets NULL {@code latest}/{@code release} — identical
+     * semantics. Artifacts in scope with no {@code meta_versions} rows at all are
+     * left untouched (no {@code sub} match), as before. The snapshot test uses
+     * {@code GLOB} (case-sensitive, matching Maven's literal {@code -SNAPSHOT}
+     * suffix and the old case-sensitive DuckDB {@code LIKE}) — SQLite's own
+     * {@code LIKE} is case-insensitive for ASCII and would wrongly exclude e.g.
+     * {@code 1.0-snapshot}-suffixed release versions.
+     */
+    private static String summaryRefreshSql(String scopeSubquery) {
+        return "UPDATE meta_artifacts AS a SET " +
+               "generated = '" + Instant.now() + "', " +
+               "latest = sub.latest, " +
+               "release = COALESCE(sub.release, sub.latest) " +
+               "FROM (" +
+               "  SELECT ga_id, " +
+               "         MAX(CASE WHEN rn = 1 AND published IS NOT NULL THEN version END) AS latest, " +
+               "         MAX(CASE WHEN rn_rel = 1 AND is_rel = 1 AND published IS NOT NULL THEN version END) AS release " +
+               "  FROM (" +
+               "    SELECT v.ga_id AS ga_id, v.version AS version, v.published AS published, " +
+               "           CASE WHEN v.version NOT GLOB '*-SNAPSHOT' THEN 1 ELSE 0 END AS is_rel, " +
+               "           ROW_NUMBER() OVER (PARTITION BY v.ga_id " +
+               "                              ORDER BY v.published DESC NULLS LAST) AS rn, " +
+               "           ROW_NUMBER() OVER (PARTITION BY v.ga_id, " +
+               "                              CASE WHEN v.version NOT GLOB '*-SNAPSHOT' THEN 1 ELSE 0 END " +
+               "                              ORDER BY v.published DESC NULLS LAST) AS rn_rel " +
+               "    FROM meta_versions v " +
+               "    WHERE v.ga_id IN (" + scopeSubquery + ")" +
+               "  ) ranked GROUP BY ga_id" +
+               ") AS sub WHERE a.id = sub.ga_id";
+    }
+
     /** Streaming writer for index-sync. Not thread-safe; drive from one thread. */
     public final class IndexSyncWriter implements AutoCloseable {
         private static final int COMMIT_EVERY = 5000;
@@ -429,8 +460,7 @@ public class MetaRepository {
             conn = getConnection();
             conn.setAutoCommit(false);
             selArtifact = conn.prepareStatement("SELECT id FROM meta_artifacts WHERE gid = ? AND aid = ?");
-            insArtifact = conn.prepareStatement(
-                    "INSERT INTO meta_artifacts (id, gid, aid) VALUES (nextval('seq_meta_artifact_id'), ?, ?) RETURNING id");
+            insArtifact = conn.prepareStatement("INSERT INTO meta_artifacts (gid, aid) VALUES (?, ?)");
             insVersion = conn.prepareStatement(
                     "INSERT INTO meta_versions (ga_id, version, published, missing_pom, packaging, file_extension, " +
                     "file_size, sha1, sha256, has_sources, has_javadoc) " +
@@ -439,7 +469,8 @@ public class MetaRepository {
         }
 
         // SELECT-then-INSERT (cached): we only INSERT when truly absent, so no
-        // ON CONFLICT is needed on the artifact row.
+        // ON CONFLICT is needed on the artifact row. The (gid,aid) unique index
+        // serves the point lookup; the new id comes from last_insert_rowid().
         private int artifactId(String gid, String aid) throws SQLException {
             String key = gid + ":" + aid;
             Integer id = idCache.get(key);
@@ -452,11 +483,9 @@ public class MetaRepository {
             if (id == null) {
                 insArtifact.setString(1, gid);
                 insArtifact.setString(2, aid);
-                try (ResultSet rs = insArtifact.executeQuery()) {
-                    if (rs.next()) id = rs.getInt(1);
-                }
+                insArtifact.executeUpdate();
+                id = lastInsertRowId(conn);
             }
-            if (id == null) throw new SQLException("could not resolve meta artifact id for " + key);
             idCache.put(key, id);
             return id;
         }
@@ -477,8 +506,10 @@ public class MetaRepository {
                 if (fileSize != null) insVersion.setLong(6, fileSize); else insVersion.setNull(6, java.sql.Types.BIGINT);
                 insVersion.setString(7, sha1);
                 insVersion.setString(8, sha256);
-                insVersion.setObject(9, hasSources);
-                insVersion.setObject(10, hasJavadoc);
+                if (hasSources != null) insVersion.setBoolean(9, hasSources);
+                else insVersion.setNull(9, java.sql.Types.BOOLEAN);
+                if (hasJavadoc != null) insVersion.setBoolean(10, hasJavadoc);
+                else insVersion.setNull(10, java.sql.Types.BOOLEAN);
                 int n = insVersion.executeUpdate();
                 maybeCommit();
                 return n > 0;
@@ -490,13 +521,11 @@ public class MetaRepository {
 
         /**
          * Recompute generated/latest/release for every artifact touched by this sync
-         * in ONE set-based pass. The previous per-artifact version ran three
-         * {@code arg_max} subqueries over {@code meta_versions WHERE ga_id = ?} each
-         * call; with no standalone index on {@code ga_id} that degrades to a full scan
-         * of the (multi-million-row) table per subquery, so a large incremental chunk
-         * touching tens of thousands of artifacts churned silently for hours. This
-         * stages the touched ids and does a single grouped aggregate over
-         * {@code meta_versions} — one pass total — mirroring the full-sync merge.
+         * in one set-based pass: stage the touched ids in a temp table and run a
+         * single grouped window pass over {@code meta_versions}, mirroring the
+         * full-sync merge. (Per-artifact point lookups would also be fine under
+         * SQLite's {@code ga_id} index; the set-based form is kept because it is
+         * still fewer statements and one shared scan.)
          * Call once, after all addVersion/removeVersion calls.
          */
         public void refreshSummaries() {
@@ -514,19 +543,7 @@ public class MetaRepository {
                     ins.executeBatch();
                 }
                 try (Statement st = conn.createStatement()) {
-                    st.execute(
-                            "UPDATE meta_artifacts AS a SET " +
-                            "generated = '" + Instant.now() + "', " +
-                            "latest = sub.latest, " +
-                            "release = COALESCE(sub.release, sub.latest) " +
-                            "FROM (" +
-                            "  SELECT v.ga_id AS ga_id, " +
-                            "         arg_max(v.version, v.published) AS latest, " +
-                            "         arg_max(v.version, v.published) FILTER (WHERE v.version NOT LIKE '%-SNAPSHOT') AS release " +
-                            "  FROM meta_versions v " +
-                            "  WHERE v.ga_id IN (SELECT ga_id FROM idx_touched) " +
-                            "  GROUP BY v.ga_id" +
-                            ") AS sub WHERE a.id = sub.ga_id");
+                    st.execute(summaryRefreshSql("SELECT ga_id FROM idx_touched"));
                     st.execute("DROP TABLE IF EXISTS idx_touched");
                 }
                 conn.commit();
@@ -569,44 +586,30 @@ public class MetaRepository {
 
     /**
      * Open a bulk loader for the FULL index bootstrap. Records (in the ~100M range,
-     * mostly duplicate file-records) are appended to a constraint-free staging
-     * table via DuckDB's {@code Appender}, then merged set-based: collapsed to
-     * distinct versions once, new artifacts bulk-created, versions bulk-inserted.
-     * This avoids the ~100M per-row {@code ON CONFLICT} index probes that made the
-     * row-by-row path take a day. Used for the full bootstrap and for the ADD records
-     * of an incremental sync (a large catch-up chunk would otherwise do one
-     * {@code SELECT id FROM meta_artifacts} point lookup per artifact, which DuckDB
-     * serves by full scan). Incremental removals (ARTIFACT_REMOVE) are applied
-     * separately via {@link IndexSyncWriter}.
+     * mostly duplicate file-records) are batch-inserted into a constraint-free
+     * staging table, then merged set-based: collapsed to distinct versions once,
+     * new artifacts bulk-created, versions bulk-inserted. This avoids ~100M
+     * per-row upsert probes on the live tables. Used for the full bootstrap and
+     * for the ADD records of an incremental sync. Incremental removals
+     * (ARTIFACT_REMOVE) are applied separately via {@link IndexSyncWriter}.
      *
-     * <p>Note: the staging table lives in {@code graph.db} and so grows the file
-     * for the duration; run {@code db compact --rewrite} afterwards to reclaim it.
+     * <p>Note: the staging table lives in {@code graph.sqlite} and grows the file
+     * for the duration; the pages are reused after the drop, but run
+     * {@code db compact --rewrite} afterwards to shrink the file itself.
      */
     public IndexStageLoader openIndexStage() throws SQLException {
-        return new IndexStageLoader(null, 0);
-    }
-
-    /**
-     * Like {@link #openIndexStage()} but with explicit DuckDB memory guards for a
-     * large merge: {@code memLimit} caps DuckDB's memory (e.g. {@code "8GB"}; null/blank
-     * = DuckDB default of ~80% RAM) and {@code dbThreads} caps its worker threads
-     * (0 = default). A spill {@code temp_directory} next to the DB and
-     * {@code preserve_insertion_order = false} are always applied (best-effort), so
-     * the set-based merge spills to disk instead of exhausting RAM alongside the JVM.
-     */
-    public IndexStageLoader openIndexStage(String memLimit, int dbThreads) throws SQLException {
-        return new IndexStageLoader(memLimit, dbThreads);
+        return new IndexStageLoader();
     }
 
     /** Bulk staging loader; see {@link #openIndexStage()}. Not thread-safe. */
     public final class IndexStageLoader implements AutoCloseable {
+        private static final int BATCH_EVERY = 5000;
         private final Connection conn;
-        private final org.duckdb.DuckDBAppender appender;
-        private boolean appenderClosed = false;
+        private final PreparedStatement insStage;
+        private int pending = 0;
 
-        private IndexStageLoader(String memLimit, int dbThreads) throws SQLException {
+        private IndexStageLoader() throws SQLException {
             conn = getConnection();
-            applyMemoryGuards(conn, memLimit, dbThreads);
             try (Statement st = conn.createStatement()) {
                 st.execute("DROP TABLE IF EXISTS idx_stage");
                 st.execute("CREATE TABLE idx_stage (" +
@@ -614,31 +617,43 @@ public class MetaRepository {
                         "file_extension VARCHAR, file_size BIGINT, sha1 VARCHAR, sha256 VARCHAR, " +
                         "has_sources BOOLEAN, has_javadoc BOOLEAN, published VARCHAR)");
             }
-            org.duckdb.DuckDBConnection duck = conn.unwrap(org.duckdb.DuckDBConnection.class);
-            appender = duck.createAppender("main", "idx_stage");
+            conn.setAutoCommit(false);
+            insStage = conn.prepareStatement(
+                    "INSERT INTO idx_stage (gid, aid, version, packaging, file_extension, file_size, " +
+                    "sha1, sha256, has_sources, has_javadoc, published) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         }
 
         /**
          * Append one (main-artifact) record. Caller should only pass records with an
          * empty classifier — the main jar/pom. Null strings are stored as ""
          * (normalised back to NULL in {@link #merge()}); a null size becomes 0.
+         * Rows are batched and committed every few thousand.
          */
         public void append(String gid, String aid, String version, String packaging, String fileExtension,
                            Long fileSize, String sha1, String sha256, Boolean hasSources, Boolean hasJavadoc,
                            Long publishedMillis) throws SQLException {
-            appender.beginRow();
-            appender.append(gid);
-            appender.append(aid);
-            appender.append(version);
-            appender.append(packaging != null ? packaging : "");
-            appender.append(fileExtension != null ? fileExtension : "");
-            appender.append(fileSize != null ? fileSize.longValue() : 0L);
-            appender.append(sha1 != null ? sha1 : "");
-            appender.append(sha256 != null ? sha256 : "");
-            appender.append(hasSources != null && hasSources);
-            appender.append(hasJavadoc != null && hasJavadoc);
-            appender.append(publishedMillis != null ? Instant.ofEpochMilli(publishedMillis).toString() : "");
-            appender.endRow();
+            insStage.setString(1, gid);
+            insStage.setString(2, aid);
+            insStage.setString(3, version);
+            insStage.setString(4, packaging != null ? packaging : "");
+            insStage.setString(5, fileExtension != null ? fileExtension : "");
+            insStage.setLong(6, fileSize != null ? fileSize : 0L);
+            insStage.setString(7, sha1 != null ? sha1 : "");
+            insStage.setString(8, sha256 != null ? sha256 : "");
+            insStage.setBoolean(9, hasSources != null && hasSources);
+            insStage.setBoolean(10, hasJavadoc != null && hasJavadoc);
+            insStage.setString(11, publishedMillis != null ? Instant.ofEpochMilli(publishedMillis).toString() : "");
+            insStage.addBatch();
+            if (++pending >= BATCH_EVERY) {
+                flushStage();
+            }
+        }
+
+        private void flushStage() throws SQLException {
+            if (pending == 0) return;
+            insStage.executeBatch();
+            conn.commit();
+            pending = 0;
         }
 
         /**
@@ -652,17 +667,15 @@ public class MetaRepository {
          * @return {@code [newArtifacts, newOrUpgradedVersions]}.
          */
         public long[] merge() throws SQLException {
-            if (!appenderClosed) {
-                appender.close();
-                appenderClosed = true;
-            }
+            flushStage();
             long newArtifacts;
             long newVersions;
             try (Statement st = conn.createStatement()) {
-                // Bulk-create artifacts not already present.
+                // Bulk-create artifacts not already present. id is omitted:
+                // SQLite assigns the INTEGER PRIMARY KEY (rowid) per inserted row.
                 newArtifacts = st.executeUpdate(
-                        "INSERT INTO meta_artifacts (id, gid, aid) " +
-                        "SELECT nextval('seq_meta_artifact_id'), s.gid, s.aid " +
+                        "INSERT INTO meta_artifacts (gid, aid) " +
+                        "SELECT s.gid, s.aid " +
                         "FROM (SELECT DISTINCT gid, aid FROM idx_stage) s " +
                         "WHERE NOT EXISTS (SELECT 1 FROM meta_artifacts a WHERE a.gid = s.gid AND a.aid = s.aid)");
                 // Pick one representative file per version (largest = main artifact), bulk-insert new ones.
@@ -682,8 +695,9 @@ public class MetaRepository {
                         // main-artifact fields when the staged file is strictly larger
                         // (e.g. the jar record lands in a later batch than the pom's).
                         // Never touches missing_pom (owned by fetch/mine); published only
-                        // fills a gap. rn = 1 guarantees one row per key per statement
-                        // (DuckDB rejects duplicate conflict keys in a single INSERT).
+                        // fills a gap. rn = 1 guarantees one row per key per statement.
+                        // (The SELECT's WHERE clause also disambiguates the upsert for
+                        // SQLite's INSERT ... SELECT ... ON CONFLICT parser.)
                         "ON CONFLICT (ga_id, version) DO UPDATE SET " +
                         "packaging = excluded.packaging, " +
                         "file_extension = excluded.file_extension, " +
@@ -695,36 +709,30 @@ public class MetaRepository {
                         "published = COALESCE(excluded.published, published) " +
                         "WHERE COALESCE(excluded.file_size, 0) > COALESCE(file_size, 0)");
                 // Refresh artifact-level summary (generated/latest/release) for the
-                // artifacts in this sync. latest = version with the most recent
-                // publish date (Maven's "last deployed" semantics); release = same
-                // excluding -SNAPSHOT. Scoped to staged coordinates.
-                st.execute(
-                        "UPDATE meta_artifacts AS a SET " +
-                        "generated = '" + Instant.now() + "', " +
-                        "latest = sub.latest, " +
-                        "release = COALESCE(sub.release, sub.latest) " +
-                        "FROM (" +
-                        "  SELECT v.ga_id AS ga_id, " +
-                        "         arg_max(v.version, v.published) AS latest, " +
-                        "         arg_max(v.version, v.published) FILTER (WHERE v.version NOT LIKE '%-SNAPSHOT') AS release " +
-                        "  FROM meta_versions v " +
-                        "  WHERE v.ga_id IN (" +
-                        "    SELECT a2.id FROM meta_artifacts a2 " +
-                        "    JOIN (SELECT DISTINCT gid, aid FROM idx_stage) s ON a2.gid = s.gid AND a2.aid = s.aid" +
-                        "  ) GROUP BY v.ga_id" +
-                        ") AS sub WHERE a.id = sub.ga_id");
+                // artifacts in this sync, scoped to staged coordinates.
+                st.execute(summaryRefreshSql(
+                        "SELECT a2.id FROM meta_artifacts a2 " +
+                        "JOIN (SELECT DISTINCT gid, aid FROM idx_stage) s ON a2.gid = s.gid AND a2.aid = s.aid"));
                 st.execute("DROP TABLE IF EXISTS idx_stage");
-                st.execute("CHECKPOINT");
+            }
+            conn.commit();
+            // Fold the WAL back into the main file now the merge is durable.
+            // Must run outside a transaction (autoCommit back on); best-effort.
+            conn.setAutoCommit(true);
+            try (Statement st = conn.createStatement()) {
+                st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+            } catch (SQLException e) {
+                log.debug("post-merge wal_checkpoint failed (harmless): {}", e.getMessage());
             }
             return new long[]{newArtifacts, newVersions};
         }
 
         @Override
         public void close() {
-            if (!appenderClosed) {
-                try { appender.close(); } catch (Exception ignore) { /* ignore */ }
-                appenderClosed = true;
-            }
+            // Un-merged staged rows are deliberately discarded (rolled back here,
+            // and idx_stage is dropped on the next open); merge() is the commit point.
+            try { insStage.close(); } catch (SQLException ignore) { /* ignore */ }
+            try { if (!conn.getAutoCommit()) conn.rollback(); } catch (SQLException ignore) { /* ignore */ }
             try { conn.close(); } catch (SQLException e) { log.error("closing index-stage connection failed", e); }
         }
     }
@@ -734,13 +742,10 @@ public class MetaRepository {
         int gaId = getOrInsertArtifact(conn, meta);
         updateArtifactFields(conn, gaId, meta);
 
-        // Make the table mirror the in-memory version set.
-        //
-        // Upsert each version rather than DELETE-all-then-INSERT: DuckDB's ART
-        // primary-key index does not reflect a row deleted earlier in the *same*
-        // transaction, so re-inserting a key we just deleted raises a spurious
-        // duplicate-key error (the documented index limitation). ON CONFLICT only
-        // updates the non-key columns, so it never re-inserts an existing key.
+        // Make the table mirror the in-memory version set: upsert each version,
+        // then delete the keys that are no longer present. (Upsert rather than
+        // DELETE-all-then-INSERT so rows that survive keep their identity and
+        // the write touches only what changed.)
         try (PreparedStatement ins = conn.prepareStatement(
                 "INSERT INTO meta_versions (ga_id, version, published, missing_pom) VALUES (?, ?, ?, ?) " +
                 "ON CONFLICT (ga_id, version) DO UPDATE SET published = excluded.published, missing_pom = excluded.missing_pom")) {
@@ -789,14 +794,21 @@ public class MetaRepository {
             }
         }
         try (PreparedStatement ins = conn.prepareStatement(
-                "INSERT INTO meta_artifacts (id, gid, aid) VALUES (nextval('seq_meta_artifact_id'), ?, ?) RETURNING id")) {
+                "INSERT INTO meta_artifacts (gid, aid) VALUES (?, ?)")) {
             ins.setString(1, meta.gid);
             ins.setString(2, meta.aid);
-            try (ResultSet rs = ins.executeQuery()) {
-                if (rs.next()) return rs.getInt(1);
-            }
+            ins.executeUpdate();
         }
-        throw new SQLException("Failed to insert meta artifact and retrieve id");
+        return lastInsertRowId(conn);
+    }
+
+    /** The rowid assigned by the most recent INSERT on {@code conn}. */
+    private static int lastInsertRowId(Connection conn) throws SQLException {
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT last_insert_rowid()")) {
+            if (rs.next()) return rs.getInt(1);
+        }
+        throw new SQLException("last_insert_rowid() returned no row");
     }
 
     private void updateArtifactFields(Connection conn, int gaId, MavenMetaData meta) throws SQLException {
@@ -814,7 +826,7 @@ public class MetaRepository {
     }
 
     public boolean exists(String gid, String aid) {
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(
                      "SELECT 1 FROM meta_artifacts WHERE gid = ? AND aid = ?")) {
             ps.setString(1, gid);
@@ -829,7 +841,7 @@ public class MetaRepository {
     }
 
     public MavenMetaData load(String gid, String aid) {
-        try (Connection conn = getConnection()) {
+        try (Connection conn = getReadConnection()) {
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT id, uri, latest, release, updated, generated, status " +
                     "FROM meta_artifacts WHERE gid = ? AND aid = ?")) {
@@ -851,7 +863,7 @@ public class MetaRepository {
         String sql = "SELECT id, gid, aid, uri, latest, release, updated, generated, status FROM meta_artifacts WHERE gid = ?"
                 + (aid != null ? " AND aid = ?" : "");
         List<MavenMetaData> out = new ArrayList<>();
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, gid);
             if (aid != null) ps.setString(2, aid);
@@ -868,7 +880,7 @@ public class MetaRepository {
 
     public List<MavenMetaData> loadAll() {
         List<MavenMetaData> out = new ArrayList<>();
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(
                      "SELECT id, gid, aid, uri, latest, release, updated, generated, status FROM meta_artifacts")) {
             try (ResultSet rs = ps.executeQuery()) {
@@ -893,10 +905,11 @@ public class MetaRepository {
      * internally when resolving ranges, so the order is cosmetic for resolution).
      *
      * <p>Backed by a single ordered join over {@code meta_artifacts}/{@code meta_versions};
-     * DuckDB does the (potentially disk-spilling) sort and rows are grouped on the client,
-     * so heap stays bounded to one artifact's version list regardless of catalogue size
-     * (no full materialisation, unlike {@link #loadAll()}). {@code gidFilter}/{@code aidFilter}
-     * may be null to scope to a group, a group+artifact, or the whole catalogue.
+     * SQLite does the (disk-backed, {@code temp_store=FILE}) sort and rows are grouped on
+     * the client, so heap stays bounded to one artifact's version list regardless of
+     * catalogue size (no full materialisation, unlike {@link #loadAll()}).
+     * {@code gidFilter}/{@code aidFilter} may be null to scope to a group, a
+     * group+artifact, or the whole catalogue.
      */
     public void streamArtifactMetadata(String gidFilter, String aidFilter,
                                        java.util.function.Consumer<ArtifactMetadata> sink) {
@@ -907,9 +920,11 @@ public class MetaRepository {
         if (gidFilter != null) conds.add("a.gid = ?");
         if (aidFilter != null) conds.add("a.aid = ?");
         if (!conds.isEmpty()) sql.append("WHERE ").append(String.join(" AND ", conds)).append(' ');
+        // NULLS LAST is deliberate: SQLite's default puts NULLs first ascending,
+        // which would push undated versions to the front of the list.
         sql.append("ORDER BY a.gid, a.aid, v.published NULLS LAST, v.version");
 
-        try (Connection conn = getConnection();
+        try (Connection conn = getReadConnection();
              PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             int idx = 1;
             if (gidFilter != null) ps.setString(idx++, gidFilter);

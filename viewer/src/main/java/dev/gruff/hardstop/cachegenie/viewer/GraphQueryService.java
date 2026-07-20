@@ -1,10 +1,10 @@
 package dev.gruff.hardstop.cachegenie.viewer;
 
+import dev.gruff.hardstop.cachegenie.graph.Sqlite;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -16,11 +16,10 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 
 /**
- * Read-only query layer over the CacheGenie DuckDB graph.
+ * Read-only query layer over the CacheGenie SQLite graph.
  *
  * <p>Rather than exposing the raw {@code artifacts} / {@code dependencies}
  * tables, this service answers <em>dependency</em> questions: what an artifact
@@ -29,8 +28,8 @@ import java.util.Set;
  * query can be constrained to a single Maven scope.</p>
  *
  * <p>The database is opened read-only and a short-lived connection is used per
- * operation, so the viewer never contends with a process that is writing to the
- * graph.</p>
+ * operation; under WAL mode these readers coexist with a concurrent writer
+ * without contention.</p>
  */
 public class GraphQueryService {
 
@@ -43,17 +42,10 @@ public class GraphQueryService {
 
     public GraphQueryService(String dbPath) {
         this.dbPath = dbPath;
-        try {
-            Class.forName("org.duckdb.DuckDBDriver");
-        } catch (ClassNotFoundException e) {
-            throw new IllegalStateException("DuckDB JDBC driver not found on the classpath", e);
-        }
     }
 
     private Connection open() throws SQLException {
-        Properties props = new Properties();
-        props.setProperty("duckdb.read_only", "true");
-        return DriverManager.getConnection("jdbc:duckdb:" + dbPath, props);
+        return Sqlite.openReadOnly(dbPath);
     }
 
     // ------------------------------------------------------------------ search

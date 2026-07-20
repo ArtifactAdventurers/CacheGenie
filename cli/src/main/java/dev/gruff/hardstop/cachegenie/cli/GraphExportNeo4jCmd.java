@@ -9,8 +9,8 @@ import picocli.CommandLine;
 import java.io.File;
 
 /**
- * Export the DuckDB graph as {@code neo4j-admin import} CSVs in Goblin's schema, for
- * the hybrid model: DuckDB stays the system of record (ingest, mining, analytics,
+ * Export the SQLite graph as {@code neo4j-admin import} CSVs in Goblin's schema, for
+ * the hybrid model: SQLite stays the system of record (ingest, mining, analytics,
  * the relational meta tables), and Neo4j becomes an optional read-side for graph
  * traversal / Weaver interop. Because the output matches Goblin's node/edge model,
  * the exported graph is queryable with the same Cypher and conceptually mergeable
@@ -35,7 +35,7 @@ public class GraphExportNeo4jCmd implements Runnable {
     @Override
     public void run() {
         CacheGenie cg = parent.parent.genie();
-        File dbFile = new File(cg.cacheGenieRoot(), "graph.db");
+        File dbFile = new File(dev.gruff.hardstop.cachegenie.graph.Sqlite.dbPath(cg.cacheGenieRoot()));
         if (!dbFile.exists()) {
             System.out.println("Graph database not found at " + dbFile.getAbsolutePath());
             System.out.println("Populate it first (graph import-goblin / graph deps / graph mine + resolve).");
